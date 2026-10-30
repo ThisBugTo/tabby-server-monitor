@@ -1,0 +1,37 @@
+{
+  "name": "tabby-server-monitor",
+  "version": "1.0.0",
+  "description": "Tabby 服务器状态监控插件：实时显示本地与 SSH 服务器的 CPU、内存、GPU、磁盘和负载，支持阈值告警",
+  "keywords": [
+    "tabby-plugin"
+  ],
+  "main": "dist/index.js",
+  "author": "zhangjunhu",
+  "license": "MIT",
+  "scripts": {
+    "build": "webpack --progress",
+    "watch": "webpack --watch --progress"
+  },
+  "files": [
+    "dist"
+  ],
+  "devDependencies": {
+    "@angular/common": "^15.0.0",
+    "@angular/core": "^15.0.0",
+    "@types/node": "^18.19.0",
+    "rxjs": "^7.8.0",
+    "tabby-core": "1.0.231-nightly.0",
+    "tabby-settings": "1.0.231-nightly.0",
+    "ts-loader": "^9.5.0",
+    "typescript": "~4.9.5",
+    "webpack": "^5.90.0",
+    "webpack-cli": "^5.1.4"
+  },
+  "peerDependencies": {
+    "@angular/common": ">=15",
+    "@angular/core": ">=15",
+    "rxjs": ">=7",
+    "tabby-core": "*",
+    "tabby-settings": "*"
+  }
+}
