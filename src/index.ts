@@ -12,7 +12,7 @@ import { MonitorService } from './services/monitor.service'
 import { MonitorTabComponent } from './components/monitorTab.component'
 import { MonitorSettingsComponent } from './components/monitorSettings.component'
 import { MonitorCardComponent } from './components/monitorCard.component'
-import { MonitorOverlayComponent } from './components/monitorOverlay.component'
+import { MonitorPaneComponent } from './components/monitorPane.component'
 
 @NgModule({
     imports: [
@@ -31,9 +31,9 @@ import { MonitorOverlayComponent } from './components/monitorOverlay.component'
         MonitorTabComponent,
         MonitorSettingsComponent,
         MonitorCardComponent,
-        MonitorOverlayComponent,
+        MonitorPaneComponent,
     ],
 })
 export default class ServerMonitorModule { }
 
-export { MonitorTabComponent, MonitorService, MonitorCardComponent, MonitorOverlayComponent }
+export { MonitorTabComponent, MonitorService, MonitorCardComponent, MonitorPaneComponent }

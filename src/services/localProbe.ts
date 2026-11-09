@@ -1,12 +1,11 @@
 import * as os from 'os'
 import { execFile } from 'child_process'
 import { Platform } from 'tabby-core'
-import { ServerStats } from '../interfaces'
-import { cpuPercentBetween, parseCpuStatLine, parseDfLine, parseGpuCsv, NVIDIA_SMI_ARGS } from './parse'
+import { DiskInfo, ProbeExtra, ProcInfo, ServerStats } from '../interfaces'
+import { cpuPercentBetween, parseDf, parsePsOutput, pickDisk, topProcs } from './parse'
+import { fetchLocalPublicIp } from './publicIp'
 
 interface CpuSample { total: number, idle: number }
-
-let gpuDisabledUntil = 0
 
 function sampleCpu (): CpuSample {
     let total = 0
@@ -32,30 +31,24 @@ function execFileAsync (cmd: string, args: string[], timeout = 5000): Promise<st
     })
 }
 
-/** 本地磁盘（macOS/Linux）；Windows 暂不采集 */
-async function probeLocalDisk (): Promise<ServerStats['disk']|null> {
-    const out = await execFileAsync('df', ['-kP', '/'])
-    const line = out.split('\n').filter(x => x.trim()).pop() ?? ''
-    return parseDfLine(line)
+/** 本地全部挂载点（df -h 式，macOS/Linux）；Windows 暂不采集 */
+async function probeLocalDisks (): Promise<DiskInfo[]> {
+    const out = await execFileAsync('df', ['-kP'])
+    return parseDf(out)
 }
 
-/** 本机 GPU：尝试 nvidia-smi（Linux/Windows），失败则视为无 GPU */
-async function probeLocalGPU (): Promise<ServerStats['gpus']> {
-    if (Date.now() < gpuDisabledUntil) {
-        return []
-    }
-    try {
-        const out = await execFileAsync('nvidia-smi', NVIDIA_SMI_ARGS)
-        return parseGpuCsv(out)
-    } catch {
-        // 常见于无 NVIDIA 驱动 / macOS，10 分钟内不再尝试
-        gpuDisabledUntil = Date.now() + 10 * 60 * 1000
-        return []
-    }
+/** 低频阶段结果（公网 IP / 进程 Top5） */
+export interface LocalAuxResult {
+    publicIp?: string|null
+    cpuTop5?: ProcInfo[]
+    memTop5?: ProcInfo[]
 }
 
-/** 采集本机状态 */
-export async function probeLocal (platform: Platform): Promise<ServerStats> {
+/**
+ * 阶段1：本机核心快数据（CPU 900ms 采样 + 内存 + 全量磁盘）。
+ * 公网 IP 与进程 Top5 由 probeLocalAux 按 TTL 单独采集，不阻塞本阶段回填。
+ */
+export async function probeLocalQuick (platform: Platform): Promise<ServerStats> {
     const first = sampleCpu()
     await new Promise(resolve => setTimeout(resolve, 900))
     const second = sampleCpu()
@@ -64,11 +57,9 @@ export async function probeLocal (platform: Platform): Promise<ServerStats> {
     const memTotal = os.totalmem()
     const memFree = os.freemem()
 
-    let disk: ServerStats['disk'] = null
-    let gpus: ServerStats['gpus'] = []
+    let disks: DiskInfo[] = []
     if (platform !== Platform.Web) {
-        disk = await probeLocalDisk().catch(() => null)
-        gpus = await probeLocalGPU().catch(() => [])
+        disks = await probeLocalDisks().catch(() => [])
     }
 
     return {
@@ -78,8 +69,23 @@ export async function probeLocal (platform: Platform): Promise<ServerStats> {
         loadAvg: os.loadavg() as [number, number, number],
         mem: { total: memTotal, available: memFree, used: memTotal - memFree },
         swap: null,
-        disk,
+        disk: pickDisk(disks, '/'),
+        disks,
         uptimeSeconds: Math.floor(os.uptime()),
-        gpus,
     }
+}
+
+/** 阶段2（按 TTL）：本机公网 IP（IPv4 优先）+ 进程 Top5 */
+export async function probeLocalAux (opts: ProbeExtra): Promise<LocalAuxResult> {
+    const result: LocalAuxResult = {}
+    if (opts.wantIp) {
+        result.publicIp = await fetchLocalPublicIp().catch(() => null)
+    }
+    if (opts.wantProcs) {
+        const psOut = await execFileAsync('ps', ['-Ao', 'pid,pcpu,pmem,comm'], 5000).catch(() => '')
+        const top = topProcs(parsePsOutput(psOut))
+        result.cpuTop5 = top.cpu
+        result.memTop5 = top.mem
+    }
+    return result
 }

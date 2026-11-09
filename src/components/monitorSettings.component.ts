@@ -25,6 +25,64 @@ import { ConfigService } from 'tabby-core'
             ></checkbox>
         </div>
 
+        <h4>展示设置</h4>
+        <div class="sm-section">
+            <checkbox
+                text='显示公网 IP'
+                [(ngModel)]='config.store.serverMonitor.display.publicIp'
+                (ngModelChange)='config.save()'
+            ></checkbox>
+            <checkbox
+                text='显示 CPU'
+                [(ngModel)]='config.store.serverMonitor.display.cpu'
+                (ngModelChange)='config.save()'
+            ></checkbox>
+            <checkbox
+                text='显示内存'
+                [(ngModel)]='config.store.serverMonitor.display.mem'
+                (ngModelChange)='config.save()'
+            ></checkbox>
+            <checkbox
+                text='显示交换分区'
+                [(ngModel)]='config.store.serverMonitor.display.swap'
+                (ngModelChange)='config.save()'
+            ></checkbox>
+            <checkbox
+                text='显示磁盘（全部挂载点）'
+                [(ngModel)]='config.store.serverMonitor.display.disk'
+                (ngModelChange)='config.save()'
+            ></checkbox>
+            <checkbox
+                text='显示负载'
+                [(ngModel)]='config.store.serverMonitor.display.load'
+                (ngModelChange)='config.save()'
+            ></checkbox>
+            <checkbox
+                text='显示进程 Top5（CPU / 内存）'
+                [(ngModel)]='config.store.serverMonitor.display.procs'
+                (ngModelChange)='config.save()'
+            ></checkbox>
+            <checkbox
+                text='显示运行时长与核数'
+                [(ngModel)]='config.store.serverMonitor.display.uptime'
+                (ngModelChange)='config.save()'
+            ></checkbox>
+        </div>
+
+        <div class="sm-section form-inline">
+            <label>占用条颜色</label>
+            <select class='form-control form-control-sm sm-select'
+                [(ngModel)]='config.store.serverMonitor.barColorMode'
+                (ngModelChange)='config.save()'>
+                <option value='auto'>自动（按占用分级：绿 / 橙 / 红）</option>
+                <option value='custom'>自定义颜色</option>
+            </select>
+            <input *ngIf='config.store.serverMonitor.barColorMode === "custom"'
+                type='color' class='sm-color'
+                [(ngModel)]='config.store.serverMonitor.barColorCustom'
+                (ngModelChange)='config.save()' />
+        </div>
+
         <div class="sm-section form-inline">
             <label>刷新间隔（秒）</label>
             <input type='number' class='form-control form-control-sm' min='2' max='300'
@@ -53,10 +111,6 @@ import { ConfigService } from 'tabby-core'
             <input type='number' class='form-control form-control-sm' min='0' max='100'
                 [(ngModel)]='config.store.serverMonitor.thresholds.memory' (change)='config.save()' />
 
-            <label>GPU</label>
-            <input type='number' class='form-control form-control-sm' min='0' max='100'
-                [(ngModel)]='config.store.serverMonitor.thresholds.gpu' (change)='config.save()' />
-
             <label>磁盘</label>
             <input type='number' class='form-control form-control-sm' min='0' max='100'
                 [(ngModel)]='config.store.serverMonitor.thresholds.disk' (change)='config.save()' />
@@ -72,7 +126,8 @@ import { ConfigService } from 'tabby-core'
             <p>说明：</p>
             <ul>
                 <li>SSH 监控通过当前已打开的 SSH 会话执行只读命令（Linux 读 /proc，macOS 用 sysctl/vm_stat/top），不影响终端中的交互会话，也无需 sudo。</li>
-                <li>远端需为 Linux 或 macOS；GPU 监控（NVIDIA）需安装 nvidia-smi（仅 Linux 常见）。</li>
+                <li>远端需为 Linux 或 macOS；不采集 GPU 数据（显卡品牌繁多，无法统一匹配）。</li>
+                <li>公网 IP 约 15 分钟采集一次、进程 Top5 约 30 秒一次，均不随刷新间隔频繁执行，避免影响系统性能。</li>
                 <li>可通过快捷键设置中的「打开服务器状态监控」绑定快捷键快速打开面板。</li>
             </ul>
         </div>
@@ -83,10 +138,42 @@ import { ConfigService } from 'tabby-core'
         .sm-section input[type=number] { width: 100px; margin-right: 16px; }
         .sm-section input[type=text] { width: 200px; }
         .form-inline { display: flex; align-items: center; flex-wrap: wrap; gap: 4px 0; }
+        .sm-select { width: 260px; margin-right: 8px; }
+        .sm-color {
+            width: 64px; height: 30px; padding: 2px;
+            border: 1px solid rgba(127, 127, 127, .4); border-radius: 4px;
+            background: transparent; cursor: pointer;
+        }
         .sm-notes { opacity: .7; font-size: 12px; margin-top: 16px; }
         .sm-notes code { padding: 0 4px; }
     `],
 })
 export class MonitorSettingsComponent {
-    constructor (public config: ConfigService) { }
+    constructor (public config: ConfigService) {
+        // 兼容旧配置：补齐新增字段（下次 config.save() 时随配置持久化）
+        const s = this.config.store.serverMonitor
+        if (s) {
+            if (!s.display) {
+                s.display = {
+                    publicIp: true,
+                    cpu: true,
+                    mem: true,
+                    swap: true,
+                    disk: true,
+                    load: true,
+                    procs: true,
+                    uptime: true,
+                }
+            }
+            if (!s.thresholds) {
+                s.thresholds = {}
+            }
+            if (!s.barColorMode) {
+                s.barColorMode = 'auto'
+            }
+            if (!s.barColorCustom) {
+                s.barColorCustom = '#81c784'
+            }
+        }
+    }
 }

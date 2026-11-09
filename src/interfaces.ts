@@ -1,21 +1,27 @@
 import type { Observable } from 'rxjs'
 
-/** GPU 信息（来自 nvidia-smi） */
-export interface GPUInfo {
-    index: number
+/** 单个挂载点的磁盘占用（df -kP 输出，单位已换算为字节） */
+export interface DiskInfo {
+    mount: string
+    total: number
+    used: number
+    usedPercent: number
+}
+
+/** 进程占用快照（ps -Ao pid,pcpu,pmem,comm 输出） */
+export interface ProcInfo {
+    pid: number
+    /** CPU 占用百分比（ps 统计口径） */
+    cpu: number
+    /** 内存占用百分比 */
+    mem: number
     name: string
-    /** GPU 利用率 % */
-    utilPercent: number|null
-    /** 显存已用 MB */
-    memUsedMB: number|null
-    /** 显存总量 MB */
-    memTotalMB: number|null
-    /** 温度 °C */
-    temperature: number|null
-    /** 风扇转速 % */
-    fanSpeed: number|null
-    /** 功耗 W */
-    powerDraw: number|null
+}
+
+/** 低频采集开关：公网 IP 与进程列表按 TTL 采集，避免每轮刷新都执行 */
+export interface ProbeExtra {
+    wantIp?: boolean
+    wantProcs?: boolean
 }
 
 /** 单次采集到的服务器状态 */
@@ -28,9 +34,17 @@ export interface ServerStats {
     loadAvg: [number, number, number]|null
     mem: { total: number, used: number, available: number }|null
     swap: { total: number, used: number }|null
-    disk: { mount: string, total: number, used: number, usedPercent: number }|null
+    /** 告警阈值用：配置挂载点所在的磁盘（与历史口径一致） */
+    disk: DiskInfo|null
+    /** df -h 式的全部挂载点 */
+    disks: DiskInfo[]
+    /** 公网 IP：仅在本轮实际采集时由探针赋值，其余轮次由 MonitorService 按缓存回填 */
+    publicIp?: string|null
+    /** CPU 占用倒序 Top5（同上，按 TTL 回填） */
+    cpuTop5?: ProcInfo[]
+    /** 内存占用倒序 Top5 */
+    memTop5?: ProcInfo[]
     uptimeSeconds: number|null
-    gpus: GPUInfo[]
 }
 
 /** 监控目标（本地或某个 SSH 标签页） */
@@ -74,6 +88,6 @@ export interface SSHTabProfileOptions {
 }
 
 export interface SSHTabLike {
-    profile?: { options?: SSHTabProfileOptions }
+    profile?: { type?: string, options?: SSHTabProfileOptions }
     sshSession: SSHTabSession|null
 }

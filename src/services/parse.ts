@@ -1,4 +1,4 @@
-import { GPUInfo } from '../interfaces'
+import { DiskInfo, ProcInfo } from '../interfaces'
 
 /** 解析 /proc/stat 首行：cpu user nice system idle iowait irq softirq ... */
 export function parseCpuStatLine (line: string): { total: number, idle: number }|null {
@@ -55,68 +55,80 @@ export function swapFromMeminfo (info: Record<string, number>): { total: number,
     return { total, used: Math.max(0, total - free) }
 }
 
-/** 解析 `df -kP <mount>` 的数据行（单位 kB） */
-export function parseDfLine (line: string): { mount: string, total: number, used: number, usedPercent: number }|null {
-    const parts = line.trim().split(/\s+/)
-    if (parts.length < 6) {
+/** 解析 `df -kP` 的一行数据（单位 kB）；挂载点可能含空格，取第 6 列起的全部剩余内容 */
+export function parseDfLine (line: string): DiskInfo|null {
+    const m = line.trim().match(/^(\S+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\S+)\s+(.+)$/)
+    if (!m) {
         return null
     }
-    const blocks = parseInt(parts[1], 10)
-    const used = parseInt(parts[2], 10)
-    const capacity = parseInt(parts[4], 10)
+    const blocks = parseInt(m[2], 10)
+    const used = parseInt(m[3], 10)
+    const capacity = parseInt(m[5], 10)
     if (isNaN(blocks) || isNaN(used)) {
         return null
     }
     return {
-        mount: parts[parts.length - 1],
+        mount: m[6].trim(),
         total: blocks * 1024,
         used: used * 1024,
         usedPercent: isNaN(capacity) ? 0 : capacity,
     }
 }
 
-/** 解析 nvidia-smi --format=csv,noheader,nounits 输出 */
-export function parseGpuCsv (text: string): GPUInfo[] {
-    const gpus: GPUInfo[] = []
-    const num = (s: string): number|null => {
-        const cleaned = (s ?? '').trim().replace(/^\[|\]$/g, '')
-        if (!cleaned || cleaned.toUpperCase().includes('N/A')) {
-            return null
+/** 解析完整 `df -kP` 输出的全部数据行（与 df -h 展示一致）；跳过表头与容量为 0 的行 */
+export function parseDf (text: string): DiskInfo[] {
+    const result: DiskInfo[] = []
+    for (const line of text.split('\n')) {
+        const d = parseDfLine(line)
+        if (d && d.total > 0) {
+            result.push(d)
         }
-        const v = parseFloat(cleaned)
-        return isNaN(v) ? null : v
     }
-    for (const rawLine of text.split('\n')) {
-        const line = rawLine.trim()
-        if (!line || /no gpu|not found|command not found/i.test(line)) {
-            continue
-        }
-        const cols = line.split(',').map(x => x.trim())
-        if (cols.length < 6) {
-            continue
-        }
-        const index = parseInt(cols[0], 10)
-        if (isNaN(index)) {
-            continue
-        }
-        gpus.push({
-            index,
-            name: cols[1] || `GPU ${index}`,
-            utilPercent: num(cols[2]),
-            memUsedMB: num(cols[3]),
-            memTotalMB: num(cols[4]),
-            temperature: num(cols[5]),
-            fanSpeed: cols.length > 6 ? num(cols[6]) : null,
-            powerDraw: cols.length > 7 ? num(cols[7]) : null,
-        })
-    }
-    return gpus
+    return result
 }
 
-export const NVIDIA_SMI_ARGS = [
-    '--query-gpu=index,name,utilization.gpu,memory.used,memory.total,temperature.gpu,fan.speed,power.draw',
-    '--format=csv,noheader,nounits',
-]
+/** 从挂载点列表挑出用于告警的磁盘：精确匹配配置挂载点 → / → 第一行（与原单点 df 语义一致） */
+export function pickDisk (disks: DiskInfo[], mount: string): DiskInfo|null {
+    return disks.find(d => d.mount === mount) ?? disks.find(d => d.mount === '/') ?? disks[0] ?? null
+}
+
+/** 校验字符串是否为 IPv4/IPv6 地址 */
+export function isValidIp (value: string): boolean {
+    const v = (value ?? '').trim()
+    if (/^\d{1,3}(\.\d{1,3}){3}$/.test(v)) {
+        return v.split('.').every(p => parseInt(p, 10) <= 255)
+    }
+    return v.length <= 45 && v.includes(':') && /^[0-9a-fA-F:.]+$/.test(v)
+}
+
+/** 解析 `ps -Ao pid,pcpu,pmem,comm` 输出（跳过表头与异常行，最多取 1000 行封顶） */
+export function parsePsOutput (text: string): ProcInfo[] {
+    const result: ProcInfo[] = []
+    for (const line of text.split('\n')) {
+        const m = line.trim().match(/^(\d+)\s+([\d.]+)\s+([\d.]+)\s+(.+)$/)
+        if (!m) {
+            continue
+        }
+        result.push({
+            pid: parseInt(m[1], 10),
+            cpu: parseFloat(m[2]) || 0,
+            mem: parseFloat(m[3]) || 0,
+            name: m[4].trim(),
+        })
+        if (result.length >= 1000) {
+            break
+        }
+    }
+    return result
+}
+
+/** 取 CPU / 内存占用倒序 Top5 */
+export function topProcs (procs: ProcInfo[]): { cpu: ProcInfo[], mem: ProcInfo[] } {
+    return {
+        cpu: [...procs].sort((a, b) => b.cpu - a.cpu).slice(0, 5),
+        mem: [...procs].sort((a, b) => b.mem - a.mem).slice(0, 5),
+    }
+}
 
 /**
  * 以下为 macOS（Darwin）解析器，采集命令均为普通用户可执行的只读命令：

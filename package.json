@@ -1,7 +1,7 @@
 {
   "name": "tabby-server-monitor",
   "version": "1.0.0",
-  "description": "Tabby 服务器状态监控插件：实时显示本地与 SSH 服务器的 CPU、内存、GPU、磁盘和负载，支持阈值告警",
+  "description": "Tabby 服务器状态监控插件：实时显示 SSH 服务器的公网 IP、CPU、内存、磁盘、负载与进程 Top5，支持阈值告警与展示项自定义",
   "keywords": [
     "tabby-plugin"
   ],
