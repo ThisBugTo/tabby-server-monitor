@@ -50,7 +50,8 @@ npm run build     # 产物在 dist/index.js
 
 ### 安装到 Tabby
 
-将整个包目录放到 Tabby 用户插件目录下的 `node_modules` 中（目录名必须为 `tabby-server-monitor`）：
+Tabby 按**目录**扫描插件（读取 `node_modules/*/package.json` 中 `keywords` 含 `tabby-plugin` 的包），
+**不是**识别一个裸 `dist` 文件夹。必须把插件作为完整包放到插件目录下，目录名必须为 `tabby-server-monitor`：
 
 | 平台 | 插件目录 |
 | ---- | ---- |
@@ -58,12 +59,39 @@ npm run build     # 产物在 dist/index.js
 | Windows | `%APPDATA%\tabby\plugins\node_modules\` |
 | Linux | `~/.config/tabby/plugins/node_modules/` |
 
-```bash
-# macOS 示例
-cp -r tabby-server-monitor ~/Library/Application\ Support/tabby/plugins/node_modules/
+安装后的目标层级（`package.json` 必需，`README.md` 建议一并拷贝）：
+
+```text
+<插件目录>/node_modules/
+└── tabby-server-monitor/        # 目录名必须与包名一致
+    ├── package.json             # 必需：tabby-plugin 关键字 + main=dist/index.js，Tabby 据此识别
+    ├── README.md                # 建议一并拷贝
+    └── dist/
+        └── index.js             # npm run build 的产物，package.json 的 main 指向这里
 ```
 
-重启 Tabby 后生效（设置 → 插件中可确认已加载）。
+> 只把 `dist/` 拷进插件目录**不生效**（缺少 `package.json`，Tabby 扫不到）。
+> `node_modules/` 无需拷贝；手动安装也不需要改 `<插件目录>/package.json`。
+
+构建后在项目目录执行（按平台二选一）：
+
+```powershell
+# Windows (PowerShell)
+$dest = "$env:APPDATA\tabby\plugins\node_modules\tabby-server-monitor"
+New-Item -ItemType Directory -Force $dest | Out-Null
+Copy-Item package.json, README.md $dest
+Copy-Item dist "$dest\dist" -Recurse -Force
+```
+
+```bash
+# macOS（Linux 将路径换成 ~/.config/tabby/plugins/node_modules/）
+dest="$HOME/Library/Application Support/tabby/plugins/node_modules/tabby-server-monitor"
+mkdir -p "$dest"
+cp package.json README.md "$dest/"
+cp -r dist "$dest/"
+```
+
+完全退出并重启 Tabby 后生效（设置 → 插件中可确认已加载）。
 
 ## 使用
 
