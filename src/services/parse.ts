@@ -68,6 +68,7 @@ export function parseDfLine (line: string): DiskInfo|null {
         return null
     }
     return {
+        fs: m[1],
         mount: m[6].trim(),
         total: blocks * 1024,
         used: used * 1024,
@@ -90,6 +91,36 @@ export function parseDf (text: string): DiskInfo[] {
 /** 从挂载点列表挑出用于告警的磁盘：精确匹配配置挂载点 → / → 第一行（与原单点 df 语义一致） */
 export function pickDisk (disks: DiskInfo[], mount: string): DiskInfo|null {
     return disks.find(d => d.mount === mount) ?? disks.find(d => d.mount === '/') ?? disks[0] ?? null
+}
+
+/** 不计入总体容量的伪/易失文件系统（匹配 df 的 Filesystem 列） */
+const EXCLUDE_FS = /^(tmpfs|devtmpfs|shm|proc|sysfs|cgroup2?|overlay|map\b|devfs|none|rpc_pipefs|configfs|debugfs|tracefs|pstore|bpf|mqueue|hugetlbfs|fusectl|securityfs|efivarfs|autofs|devpts|nsfs|binfmt_misc|squashfs)/i
+
+/** 不计入总体容量的系统虚拟挂载点（macOS APFS 共享卷、/run 易失树等） */
+const EXCLUDE_MOUNT = /^\/(run|dev|sys|proc|snap|System\/Volumes|private\/var)(\/|$)/i
+
+/**
+ * 磁盘总体容量：合计真实磁盘。
+ * 排除 tmpfs/devtmpfs/overlay 等易失与虚拟文件系统、macOS APFS 共享卷（/System/Volumes/*）、
+ * /run /dev 等系统挂载点，并按 Filesystem 去重（bind mount / BTRFS 子卷不重复计）。
+ * 已知局限：ZFS 多数据集共享池空间会偏大。
+ */
+export function summarizeDisks (disks: DiskInfo[]): { total: number, used: number, usedPercent: number }|null {
+    let total = 0
+    let used = 0
+    const seenFs = new Set<string>()
+    for (const d of disks) {
+        if (EXCLUDE_FS.test(d.fs) || EXCLUDE_MOUNT.test(d.mount) || seenFs.has(d.fs)) {
+            continue
+        }
+        seenFs.add(d.fs)
+        total += d.total
+        used += d.used
+    }
+    if (total <= 0) {
+        return null
+    }
+    return { total, used, usedPercent: Math.max(0, Math.min(100, used / total * 100)) }
 }
 
 /** 校验字符串是否为 IPv4/IPv6 地址 */

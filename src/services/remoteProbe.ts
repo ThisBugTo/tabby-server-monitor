@@ -3,7 +3,7 @@ import { ProbeExtra, ProcInfo, ServerStats, SSHTabSession } from '../interfaces'
 import {
     cpuPercentBetween, parseCpuStatLine, parseDf, parseMeminfo, memFromMeminfo,
     swapFromMeminfo, parseMacTopCpuLine, parseMacMem, parseMacSwap, parseMacLoadavg, parseMacUptime,
-    isValidIp, parsePsOutput, pickDisk, topProcs,
+    isValidIp, parsePsOutput, pickDisk, summarizeDisks, topProcs,
 } from './parse'
 
 const M_OS = '#SM#OS'
@@ -279,6 +279,7 @@ export async function probeSSHQuick (sshSession: SSHTabSession, diskMount: strin
     }
     // 全量挂载点已由 parse 得到；告警仍取配置挂载点所在磁盘（与原单点 df 语义一致）
     stats.disk = pickDisk(stats.disks, diskMount || '/')
+    stats.diskSummary = summarizeDisks(stats.disks)
     return {
         stats,
         os: firstLine(section(out, M_OS, M_HOST)),

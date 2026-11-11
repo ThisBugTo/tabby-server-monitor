@@ -555,6 +555,17 @@ MonitorCardComponent = __decorate([
                     </ng-container>
                 </div>
 
+                <!-- 磁盘总体容量：真实磁盘合计，位于虚线分割线上方（明细见下方分区） -->
+                <div class="sm-row" *ngIf="show('disk') && t.stats.diskSummary as sum">
+                    <span class="sm-key">磁盘</span>
+                    <div class="sm-bar"><div class="sm-fill"
+                        [style.width.%]='sum.usedPercent'
+                        [style.background]='barColor(sum.usedPercent)'></div></div>
+                    <span class="sm-val" [title]='"全部挂载点合计（已排除 tmpfs 等易失分区，按设备去重）"'>
+                        {{ fmtBytes(sum.used) }}/{{ fmtBytes(sum.total) }}
+                    </span>
+                </div>
+
                 <!-- 磁盘：单独虚线分区，展示全部挂载点（df -h 式） -->
                 <div class="sm-section" *ngIf="show('disk') && t.stats.disks.length">
                     <div class="sm-row" *ngFor="let d of t.stats.disks; trackBy: trackDisk">
@@ -1388,6 +1399,7 @@ async function probeLocalQuick(platform) {
         swap: null,
         disk: (0, parse_1.pickDisk)(disks, '/'),
         disks,
+        diskSummary: (0, parse_1.summarizeDisks)(disks),
         uptimeSeconds: Math.floor(os.uptime()),
     };
 }
@@ -1783,7 +1795,7 @@ exports.MonitorService = MonitorService;
 
 
 Object.defineProperty(exports, "__esModule", ({ value: true }));
-exports.parseMacUptime = exports.parseMacLoadavg = exports.parseMacSwap = exports.parseMacMem = exports.parseMacTopCpuLine = exports.topProcs = exports.parsePsOutput = exports.isValidIp = exports.pickDisk = exports.parseDf = exports.parseDfLine = exports.swapFromMeminfo = exports.memFromMeminfo = exports.parseMeminfo = exports.cpuPercentBetween = exports.parseCpuStatLine = void 0;
+exports.parseMacUptime = exports.parseMacLoadavg = exports.parseMacSwap = exports.parseMacMem = exports.parseMacTopCpuLine = exports.topProcs = exports.parsePsOutput = exports.isValidIp = exports.summarizeDisks = exports.pickDisk = exports.parseDf = exports.parseDfLine = exports.swapFromMeminfo = exports.memFromMeminfo = exports.parseMeminfo = exports.cpuPercentBetween = exports.parseCpuStatLine = void 0;
 /** 解析 /proc/stat 首行：cpu user nice system idle iowait irq softirq ... */
 function parseCpuStatLine(line) {
     var _a, _b;
@@ -1853,6 +1865,7 @@ function parseDfLine(line) {
         return null;
     }
     return {
+        fs: m[1],
         mount: m[6].trim(),
         total: blocks * 1024,
         used: used * 1024,
@@ -1878,6 +1891,34 @@ function pickDisk(disks, mount) {
     return (_c = (_b = (_a = disks.find(d => d.mount === mount)) !== null && _a !== void 0 ? _a : disks.find(d => d.mount === '/')) !== null && _b !== void 0 ? _b : disks[0]) !== null && _c !== void 0 ? _c : null;
 }
 exports.pickDisk = pickDisk;
+/** 不计入总体容量的伪/易失文件系统（匹配 df 的 Filesystem 列） */
+const EXCLUDE_FS = /^(tmpfs|devtmpfs|shm|proc|sysfs|cgroup2?|overlay|map\b|devfs|none|rpc_pipefs|configfs|debugfs|tracefs|pstore|bpf|mqueue|hugetlbfs|fusectl|securityfs|efivarfs|autofs|devpts|nsfs|binfmt_misc|squashfs)/i;
+/** 不计入总体容量的系统虚拟挂载点（macOS APFS 共享卷、/run 易失树等） */
+const EXCLUDE_MOUNT = /^\/(run|dev|sys|proc|snap|System\/Volumes|private\/var)(\/|$)/i;
+/**
+ * 磁盘总体容量：合计真实磁盘。
+ * 排除 tmpfs/devtmpfs/overlay 等易失与虚拟文件系统、macOS APFS 共享卷（/System/Volumes/*）、
+ * /run /dev 等系统挂载点，并按 Filesystem 去重（bind mount / BTRFS 子卷不重复计）。
+ * 已知局限：ZFS 多数据集共享池空间会偏大。
+ */
+function summarizeDisks(disks) {
+    let total = 0;
+    let used = 0;
+    const seenFs = new Set();
+    for (const d of disks) {
+        if (EXCLUDE_FS.test(d.fs) || EXCLUDE_MOUNT.test(d.mount) || seenFs.has(d.fs)) {
+            continue;
+        }
+        seenFs.add(d.fs);
+        total += d.total;
+        used += d.used;
+    }
+    if (total <= 0) {
+        return null;
+    }
+    return { total, used, usedPercent: Math.max(0, Math.min(100, used / total * 100)) };
+}
+exports.summarizeDisks = summarizeDisks;
 /** 校验字符串是否为 IPv4/IPv6 地址 */
 function isValidIp(value) {
     const v = (value !== null && value !== void 0 ? value : '').trim();
@@ -2359,6 +2400,7 @@ async function probeSSHQuick(sshSession, diskMount) {
     }
     // 全量挂载点已由 parse 得到；告警仍取配置挂载点所在磁盘（与原单点 df 语义一致）
     stats.disk = (0, parse_1.pickDisk)(stats.disks, diskMount || '/');
+    stats.diskSummary = (0, parse_1.summarizeDisks)(stats.disks);
     return {
         stats,
         os: firstLine(section(out, M_OS, M_HOST)),

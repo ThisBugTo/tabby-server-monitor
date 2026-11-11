@@ -2,6 +2,8 @@ import type { Observable } from 'rxjs'
 
 /** 单个挂载点的磁盘占用（df -kP 输出，单位已换算为字节） */
 export interface DiskInfo {
+    /** df 的 Filesystem 列（设备/文件系统名，用于去重与排除易失挂载） */
+    fs: string
     mount: string
     total: number
     used: number
@@ -38,6 +40,8 @@ export interface ServerStats {
     disk: DiskInfo|null
     /** df -h 式的全部挂载点 */
     disks: DiskInfo[]
+    /** 磁盘总体容量：真实磁盘合计（排除 tmpfs 等易失挂载，按设备去重） */
+    diskSummary?: { total: number, used: number, usedPercent: number }|null
     /** 公网 IP：仅在本轮实际采集时由探针赋值，其余轮次由 MonitorService 按缓存回填 */
     publicIp?: string|null
     /** CPU 占用倒序 Top5（同上，按 TTL 回填） */

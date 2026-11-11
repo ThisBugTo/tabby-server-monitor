@@ -60,6 +60,17 @@ import { MonitorService } from '../services/monitor.service'
                     </ng-container>
                 </div>
 
+                <!-- 磁盘总体容量：真实磁盘合计，位于虚线分割线上方（明细见下方分区） -->
+                <div class="sm-row" *ngIf="show('disk') && t.stats.diskSummary as sum">
+                    <span class="sm-key">磁盘</span>
+                    <div class="sm-bar"><div class="sm-fill"
+                        [style.width.%]='sum.usedPercent'
+                        [style.background]='barColor(sum.usedPercent)'></div></div>
+                    <span class="sm-val" [title]='"全部挂载点合计（已排除 tmpfs 等易失分区，按设备去重）"'>
+                        {{ fmtBytes(sum.used) }}/{{ fmtBytes(sum.total) }}
+                    </span>
+                </div>
+
                 <!-- 磁盘：单独虚线分区，展示全部挂载点（df -h 式） -->
                 <div class="sm-section" *ngIf="show('disk') && t.stats.disks.length">
                     <div class="sm-row" *ngFor="let d of t.stats.disks; trackBy: trackDisk">

@@ -2,7 +2,7 @@ import * as os from 'os'
 import { execFile } from 'child_process'
 import { Platform } from 'tabby-core'
 import { DiskInfo, ProbeExtra, ProcInfo, ServerStats } from '../interfaces'
-import { cpuPercentBetween, parseDf, parsePsOutput, pickDisk, topProcs } from './parse'
+import { cpuPercentBetween, parseDf, parsePsOutput, pickDisk, summarizeDisks, topProcs } from './parse'
 import { fetchLocalPublicIp } from './publicIp'
 
 interface CpuSample { total: number, idle: number }
@@ -71,6 +71,7 @@ export async function probeLocalQuick (platform: Platform): Promise<ServerStats>
         swap: null,
         disk: pickDisk(disks, '/'),
         disks,
+        diskSummary: summarizeDisks(disks),
         uptimeSeconds: Math.floor(os.uptime()),
     }
 }
