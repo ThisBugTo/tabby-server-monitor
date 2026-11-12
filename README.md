@@ -51,15 +51,37 @@ npm run build     # 产物在 dist/index.js
 ### 安装到 Tabby
 
 Tabby 按**目录**扫描插件（读取 `node_modules/*/package.json` 中 `keywords` 含 `tabby-plugin` 的包），
-**不是**识别一个裸 `dist` 文件夹。必须把插件作为完整包放到插件目录下，目录名必须为 `tabby-server-monitor`：
+**不是**识别一个裸 `dist` 文件夹。必须把插件作为完整包放到插件目录下，目录名必须为 `tabby-server-monitor`。
+
+下表为 Tabby **插件根目录**（`plugins`，注意是根目录，**不是**其下的 `node_modules`）：
 
 | 平台 | 插件目录 |
 | ---- | ---- |
-| macOS | `~/Library/Application Support/tabby/plugins/node_modules/` |
-| Windows | `%APPDATA%\tabby\plugins\node_modules\` |
-| Linux | `~/.config/tabby/plugins/node_modules/` |
+| macOS | `~/Library/Application Support/tabby/plugins/` |
+| Windows | `%APPDATA%\tabby\plugins\` |
+| Linux | `~/.config/tabby/plugins/` |
 
-安装后的目标层级（`package.json` 必需，`README.md` 建议一并拷贝）：
+**方式一（推荐，长期使用）：登记为 `file:` 依赖**
+
+手工拷贝进 `node_modules` 的插件未记入 `package.json`，Tabby 更新其他插件时 npm 会把它当“多余包”清空。登记为依赖后 npm 操作会永久保留；且插件目录直接链接到代码仓库——仓库内 `npm run build` 后重启 Tabby 即生效，无需再拷贝：
+
+```bash
+# 1) 获取代码到任意位置（仓库已包含构建好的 dist/index.js，仅使用时无需安装依赖）
+git clone https://github.com/ThisBugTo/tabby-server-monitor.git <你的仓库路径>
+
+# 2) 在 Tabby 插件根目录登记为依赖（macOS 示例，其他平台见上表）
+#    <你的仓库路径> 换成上面第 1 步克隆到的绝对路径
+cd ~/Library/Application\ Support/tabby/plugins
+npm install "file:<你的仓库路径>" --no-audit --no-fund
+
+# 3) 重启 Tabby（设置 → 插件中可确认已加载）
+```
+
+换其他电脑重复此操作时，只需把两处 `<你的仓库路径>` 换成新机器上的实际位置。
+
+**方式二（临时试用）：选择性拷贝**
+
+拷贝后的目标层级（`package.json` 必需，`README.md` 建议一并拷贝）：
 
 ```text
 <插件目录>/node_modules/
@@ -71,7 +93,7 @@ Tabby 按**目录**扫描插件（读取 `node_modules/*/package.json` 中 `keyw
 ```
 
 > 只把 `dist/` 拷进插件目录**不生效**（缺少 `package.json`，Tabby 扫不到）。
-> `node_modules/` 无需拷贝；手动安装也不需要改 `<插件目录>/package.json`。
+> `node_modules/` 无需拷贝；手动安装也不需要改插件根目录的 `package.json`。
 
 构建后在项目目录执行（按平台二选一）：
 
@@ -92,6 +114,8 @@ cp -r dist "$dest/"
 ```
 
 完全退出并重启 Tabby 后生效（设置 → 插件中可确认已加载）。
+
+⚠️ 方式二未登记依赖，Tabby 更新其他插件后会被 npm 清空，需重新拷贝；长期使用请用方式一。
 
 ## 使用
 
