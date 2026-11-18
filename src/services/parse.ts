@@ -132,6 +132,16 @@ export function isValidIp (value: string): boolean {
     return v.length <= 45 && v.includes(':') && /^[0-9a-fA-F:.]+$/.test(v)
 }
 
+/** 进程名：仅保留名称，去掉绝对路径前缀（macOS 的 ps comm 列为完整路径）；保留 kworker/0:1 这类带斜杠的内核线程名 */
+function procName (raw: string): string {
+    const v = raw.trim()
+    if (!v.startsWith('/')) {
+        return v
+    }
+    const idx = v.lastIndexOf('/')
+    return idx >= 0 && idx < v.length - 1 ? v.slice(idx + 1) : v
+}
+
 /** 解析 `ps -Ao pid,pcpu,pmem,comm` 输出（跳过表头与异常行，最多取 1000 行封顶） */
 export function parsePsOutput (text: string): ProcInfo[] {
     const result: ProcInfo[] = []
@@ -144,7 +154,7 @@ export function parsePsOutput (text: string): ProcInfo[] {
             pid: parseInt(m[1], 10),
             cpu: parseFloat(m[2]) || 0,
             mem: parseFloat(m[3]) || 0,
-            name: m[4].trim(),
+            name: procName(m[4]),
         })
         if (result.length >= 1000) {
             break

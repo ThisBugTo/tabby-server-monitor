@@ -53,11 +53,6 @@ import { ConfigService } from 'tabby-core'
                 (ngModelChange)='config.save()'
             ></checkbox>
             <checkbox
-                text='显示负载'
-                [(ngModel)]='config.store.serverMonitor.display.load'
-                (ngModelChange)='config.save()'
-            ></checkbox>
-            <checkbox
                 text='显示进程 Top5（CPU / 内存）'
                 [(ngModel)]='config.store.serverMonitor.display.procs'
                 (ngModelChange)='config.save()'
@@ -160,7 +155,6 @@ export class MonitorSettingsComponent {
                     mem: true,
                     swap: true,
                     disk: true,
-                    load: true,
                     procs: true,
                     uptime: true,
                 }

@@ -23,7 +23,7 @@ import { MONITOR_ICON_SVG } from '../icons'
 
                 <div class="sm-empty" *ngIf="!targets.length">
                     当前没有可监控的目标。<br>
-                    在「设置 → 服务器监控」中启用本地监控，或打开一个 SSH 连接标签页后，这里会自动显示其 CPU、内存、GPU、磁盘和负载。
+                    在「设置 → 服务器监控」中启用本地监控，或打开一个 SSH 连接标签页后，这里会自动显示其 CPU、内存、磁盘和进程占用。
                 </div>
             </div>
         </div>

@@ -1,7 +1,8 @@
-import { Component, EventEmitter, Injector, Input, Output } from '@angular/core'
-import { BaseTabComponent } from 'tabby-core'
+import { Component, EventEmitter, HostBinding, Injector, Input, Output } from '@angular/core'
+import { BaseTabComponent, ThemesService } from 'tabby-core'
 import { MonitorTarget } from '../interfaces'
 import { MonitorService } from '../services/monitor.service'
+import { isLightTheme } from '../theme'
 import { MONITOR_ICON_SVG } from '../icons'
 
 /**
@@ -36,6 +37,11 @@ import { MONITOR_ICON_SVG } from '../icons'
             flex-direction: column;
             background: #232326;
             color: #eee;
+        }
+        /* 亮色主题：跟随 Tabby 亮/暗色切换（由 .sm-light 标记） */
+        :host(.sm-light) {
+            background: #f2f3f5;
+            color: #1e1e1e;
         }
         .sm-panel {
             display: flex;
@@ -86,11 +92,18 @@ export class MonitorPaneComponent extends BaseTabComponent {
     private _targetId = ''
     private allTargets: MonitorTarget[] = []
 
+    /** 是否亮色主题（跟随 Tabby 亮/暗色切换） */
+    @HostBinding('class.sm-light') isLight = false
+
     constructor (
         public monitor: MonitorService,
         injector: Injector,
+        private themes: ThemesService,
     ) {
         super(injector)
+        const updateTheme = (): void => { this.isLight = isLightTheme(this.themes) }
+        updateTheme()
+        this.subscribeUntilDestroyed(this.themes.themeChanged$, updateTheme)
         this.setTitle('服务器监控')
         this.icon = MONITOR_ICON_SVG
         this.subscribeUntilDestroyed(monitor.targets$, targets => {
