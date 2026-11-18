@@ -35,6 +35,8 @@ export class MonitorService {
     private pendingRefresh = false
     /** 最近一次采集的目标列表（供任何时机的 notify 推送最新数据，包括后台低频阶段完成时） */
     private lastDescriptors: MonitorTarget[] = []
+    /** 各目标最近一次成功取得 CPU 值的时间（key = target id），用于阶段1 沿用旧值时判断是否过期 */
+    private cpuAt = new Map<string, number>()
 
     /** 公网 IP 成功后的复用时长（IP 极少变化） */
     private static readonly IP_TTL_OK = 15 * 60 * 1000
@@ -42,6 +44,8 @@ export class MonitorService {
     private static readonly IP_TTL_FAIL = 5 * 60 * 1000
     /** 进程 Top5 采集间隔（ps 为轻量只读命令，但不随 5 秒主循环执行） */
     private static readonly PROC_TTL = 30 * 1000
+    /** CPU 补采连续失败期间，阶段1 沿用旧值的最长时长；超过后恢复隐藏，避免长期展示过期数据 */
+    private static readonly CPU_STALE_MS = 30 * 1000
 
     constructor (
         private app: AppService,
@@ -142,6 +146,7 @@ export class MonitorService {
             if (!seen.has(key)) {
                 this.stateCache.delete(key)
                 this.auxCache.delete(key)
+                this.cpuAt.delete(key)
             }
         }
         return result
@@ -184,6 +189,16 @@ export class MonitorService {
             stats.memTop5 = aux.memTop5
         }
         const commit = (stats: ServerStats): void => {
+            // 阶段1 快数据不含 CPU（SSH 两段采样，补采在阶段2）：若新值为空，沿用上一轮未过期的值，
+            // 避免每轮刷新时 CPU 行先消失、补采完成后又出现的闪烁
+            if (stats.cpuPercent === null) {
+                const prevCpu = target.stats?.cpuPercent
+                if (prevCpu != null && Date.now() - (this.cpuAt.get(target.id) ?? 0) <= MonitorService.CPU_STALE_MS) {
+                    stats.cpuPercent = prevCpu
+                }
+            } else {
+                this.cpuAt.set(target.id, Date.now())
+            }
             target.stats = stats
             target.error = null
             target.lastUpdated = Date.now()
@@ -248,6 +263,7 @@ export class MonitorService {
                 const cpu = await probeSSHCpu(session, cfg.cpuSampleSeconds ?? 1, quick)
                 if (cpu !== null && target.stats === quick.stats) {
                     quick.stats.cpuPercent = cpu
+                    this.cpuAt.set(target.id, Date.now())
                     this.checkThresholds(target, quick.stats, cfg)
                     notify()
                 }

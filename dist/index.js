@@ -1471,6 +1471,8 @@ let MonitorService = MonitorService_1 = class MonitorService {
         this.pendingRefresh = false;
         /** 最近一次采集的目标列表（供任何时机的 notify 推送最新数据，包括后台低频阶段完成时） */
         this.lastDescriptors = [];
+        /** 各目标最近一次成功取得 CPU 值的时间（key = target id），用于阶段1 沿用旧值时判断是否过期 */
+        this.cpuAt = new Map();
         this.logger = log.create('server-monitor');
         this.config.ready$.toPromise().then(() => {
             this.startLoop();
@@ -1562,6 +1564,7 @@ let MonitorService = MonitorService_1 = class MonitorService {
             if (!seen.has(key)) {
                 this.stateCache.delete(key);
                 this.auxCache.delete(key);
+                this.cpuAt.delete(key);
             }
         }
         return result;
@@ -1604,6 +1607,18 @@ let MonitorService = MonitorService_1 = class MonitorService {
             stats.memTop5 = aux.memTop5;
         };
         const commit = (stats) => {
+            var _a, _b;
+            // 阶段1 快数据不含 CPU（SSH 两段采样，补采在阶段2）：若新值为空，沿用上一轮未过期的值，
+            // 避免每轮刷新时 CPU 行先消失、补采完成后又出现的闪烁
+            if (stats.cpuPercent === null) {
+                const prevCpu = (_a = target.stats) === null || _a === void 0 ? void 0 : _a.cpuPercent;
+                if (prevCpu != null && Date.now() - ((_b = this.cpuAt.get(target.id)) !== null && _b !== void 0 ? _b : 0) <= MonitorService_1.CPU_STALE_MS) {
+                    stats.cpuPercent = prevCpu;
+                }
+            }
+            else {
+                this.cpuAt.set(target.id, Date.now());
+            }
             target.stats = stats;
             target.error = null;
             target.lastUpdated = Date.now();
@@ -1668,6 +1683,7 @@ let MonitorService = MonitorService_1 = class MonitorService {
                 const cpu = await (0, remoteProbe_1.probeSSHCpu)(session, (_c = cfg.cpuSampleSeconds) !== null && _c !== void 0 ? _c : 1, quick);
                 if (cpu !== null && target.stats === quick.stats) {
                     quick.stats.cpuPercent = cpu;
+                    this.cpuAt.set(target.id, Date.now());
                     this.checkThresholds(target, quick.stats, cfg);
                     notify();
                 }
@@ -1778,6 +1794,8 @@ MonitorService.IP_TTL_OK = 15 * 60 * 1000;
 MonitorService.IP_TTL_FAIL = 5 * 60 * 1000;
 /** 进程 Top5 采集间隔（ps 为轻量只读命令，但不随 5 秒主循环执行） */
 MonitorService.PROC_TTL = 30 * 1000;
+/** CPU 补采连续失败期间，阶段1 沿用旧值的最长时长；超过后恢复隐藏，避免长期展示过期数据 */
+MonitorService.CPU_STALE_MS = 30 * 1000;
 MonitorService = MonitorService_1 = __decorate([
     (0, core_1.Injectable)({ providedIn: 'root' }),
     __metadata("design:paramtypes", [typeof (_a = typeof tabby_core_1.AppService !== "undefined" && tabby_core_1.AppService) === "function" ? _a : Object, typeof (_b = typeof tabby_core_1.ConfigService !== "undefined" && tabby_core_1.ConfigService) === "function" ? _b : Object, typeof (_c = typeof tabby_core_1.NotificationsService !== "undefined" && tabby_core_1.NotificationsService) === "function" ? _c : Object, typeof (_d = typeof tabby_core_1.LogService !== "undefined" && tabby_core_1.LogService) === "function" ? _d : Object, typeof (_e = typeof tabby_core_1.HostAppService !== "undefined" && tabby_core_1.HostAppService) === "function" ? _e : Object])
