@@ -41,6 +41,7 @@ export class MonitorConfigProvider extends ConfigProvider {
         },
         hotkeys: {
             'open-server-monitor': null,
+            'open-file-transfer': null,
         },
     }
 }

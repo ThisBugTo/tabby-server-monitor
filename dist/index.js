@@ -18,7 +18,7 @@ var __decorate = (this && this.__decorate) || function (decorators, target, key,
 var __metadata = (this && this.__metadata) || function (k, v) {
     if (typeof Reflect === "object" && typeof Reflect.metadata === "function") return Reflect.metadata(k, v);
 };
-var _a, _b, _c, _d;
+var _a, _b, _c, _d, _e;
 Object.defineProperty(exports, "__esModule", ({ value: true }));
 exports.MonitorButtonProvider = void 0;
 const core_1 = __webpack_require__(/*! @angular/core */ "@angular/core");
@@ -26,24 +26,31 @@ const operators_1 = __webpack_require__(/*! rxjs/operators */ "rxjs/operators");
 const tabby_core_1 = __webpack_require__(/*! tabby-core */ "tabby-core");
 const monitorTab_component_1 = __webpack_require__(/*! ./components/monitorTab.component */ "./src/components/monitorTab.component.ts");
 const monitorPane_component_1 = __webpack_require__(/*! ./components/monitorPane.component */ "./src/components/monitorPane.component.ts");
+const filePane_component_1 = __webpack_require__(/*! ./components/filePane.component */ "./src/components/filePane.component.ts");
 const monitor_service_1 = __webpack_require__(/*! ./services/monitor.service */ "./src/services/monitor.service.ts");
 const icons_1 = __webpack_require__(/*! ./icons */ "./src/icons.ts");
 /** @hidden */
 let MonitorButtonProvider = class MonitorButtonProvider extends tabby_core_1.ToolbarButtonProvider {
     constructor(app, tabsService, hotkeys, 
     // 注入监控服务，使插件加载后即启动监控循环（支持后台告警）
-    monitor) {
+    monitor, notifications) {
         super();
         this.app = app;
         this.tabsService = tabsService;
         this.monitor = monitor;
+        this.notifications = notifications;
         /** 每个 SSH 标签页固定持有的监控面板（一窗一面板，不跨窗口移动） */
         this.panes = new Map();
+        /** 每个 SSH 标签页的底部文件传输面板（手动开关，不自动弹出） */
+        this.filePanes = new Map();
         /** 已挂载 tabAdded 监听的分屏（避免重复订阅） */
         this.watchedSplits = new WeakSet();
         hotkeys.hotkey$.subscribe(hotkey => {
             if (hotkey === 'open-server-monitor') {
                 void this.open();
+            }
+            else if (hotkey === 'open-file-transfer') {
+                this.toggleFilePaneForActive();
             }
         });
         // 切换标签页时只修复分屏布局并补挂分屏监听；面板按 SSH 标签固定绑定，不跟随活动窗口移动
@@ -75,6 +82,12 @@ let MonitorButtonProvider = class MonitorButtonProvider extends tabby_core_1.Too
                 touchBarTitle: 'Monitor',
                 weight: 5,
                 click: () => { void this.open(); },
+            }, {
+                icon: icons_1.FOLDER_ICON_SVG,
+                title: '文件传输（SSH 文件上传/下载）',
+                touchBarTitle: 'Files',
+                weight: 6,
+                click: () => this.toggleFilePaneForActive(),
             }];
     }
     async open() {
@@ -85,6 +98,78 @@ let MonitorButtonProvider = class MonitorButtonProvider extends tabby_core_1.Too
             return;
         }
         await this.togglePane(sshTab);
+    }
+    /** 文件传输面板开关（工具栏按钮 / 快捷键）；无 SSH 会话时提示而不是静默失败 */
+    toggleFilePaneForActive() {
+        const sshTab = this.findActiveSSHTab();
+        if (!sshTab) {
+            this.notifications.error('文件传输需要 SSH 连接', '请先打开一个 SSH 标签页');
+            return;
+        }
+        void this.toggleFilePane(sshTab);
+    }
+    /** 开关指定 SSH 会话自己的底部文件传输面板 */
+    async toggleFilePane(sshTab) {
+        var _a;
+        const existing = this.filePanes.get(sshTab);
+        if (existing) {
+            this.closePane(existing);
+            return;
+        }
+        // 打开：先切到目标标签，保证面板可见
+        const top = (_a = sshTab.topmostParent) !== null && _a !== void 0 ? _a : sshTab;
+        if (top !== this.app.activeTab) {
+            this.app.selectTab(top);
+        }
+        await this.openFilePaneFor(sshTab);
+    }
+    /** 在 SSH 标签**下方**创建文件传输面板（FinalShell 底部文件面板风格，可拖中线调高矮） */
+    async openFilePaneFor(sshTab) {
+        if (this.filePanes.has(sshTab)) {
+            return;
+        }
+        const pane = this.tabsService.create({ type: filePane_component_1.FilePaneComponent, inputs: { tab: sshTab } });
+        // 先占位：重入调用因 has() 直接跳过，不会重复开面板
+        this.filePanes.set(sshTab, pane);
+        pane.destroyed$.subscribe(() => {
+            if (this.filePanes.get(sshTab) === pane) {
+                this.filePanes.delete(sshTab);
+            }
+        });
+        pane.close.subscribe(() => this.closePane(pane));
+        // SSH 标签被单独关闭时延迟收掉它的孤儿面板（整窗关闭时面板已随分屏销毁，查不到即跳过）
+        sshTab.destroyed$.pipe((0, operators_1.take)(1)).subscribe(() => {
+            setImmediate(() => {
+                const orphan = this.filePanes.get(sshTab);
+                if (orphan === null || orphan === void 0 ? void 0 : orphan.parent) {
+                    this.closePane(orphan);
+                }
+            });
+        });
+        const split = this.splitOf(sshTab);
+        if (!split) {
+            this.filePanes.delete(sshTab);
+            pane.destroy();
+            return;
+        }
+        try {
+            // 'b' = 插到 SSH 标签下方；分屏方向不匹配时 Tabby 会自动包一层纵向容器
+            await split.addTab(pane, sshTab, 'b');
+        }
+        catch (err) {
+            console.error('[server-monitor] 插入文件传输面板失败', err);
+            this.filePanes.delete(sshTab);
+            pane.destroy();
+            return;
+        }
+        this.fitPaneRatio(split, pane);
+        // 焦点交还 SSH 终端（不抢输入焦点，与监控面板一致）
+        setImmediate(() => {
+            if (pane.parent === split) {
+                split.focus(sshTab);
+            }
+            this.blurInactiveTopTabs();
+        });
     }
     /** 新开/恢复的 SSH 标签就绪后，为其中每个 SSH 会话自动打开专属面板（受设置开关控制；panes 幂等去重） */
     autoOpenFor(tab) {
@@ -216,7 +301,7 @@ let MonitorButtonProvider = class MonitorButtonProvider extends tabby_core_1.Too
             this.blurInactiveTopTabs();
         });
     }
-    /** 关闭面板：从分屏摘除并销毁组件（removeTab 只摘视图，不销毁实例） */
+    /** 关闭插入式面板（监控 / 文件传输通用）：从分屏摘除并销毁组件（removeTab 只摘视图，不销毁实例） */
     closePane(pane) {
         const split = pane.parent;
         if (split) {
@@ -301,7 +386,7 @@ let MonitorButtonProvider = class MonitorButtonProvider extends tabby_core_1.Too
         }
         return changed;
     }
-    /** 面板初始宽度约 400px（与原浮窗一致），其余宽度留给 SSH 终端 */
+    /** 面板初始占比：左侧监控面板约 400px 宽、底部文件面板约 300px 高，其余留给 SSH 终端 */
     fitPaneRatio(split, pane) {
         // 先修复恢复分屏可能损坏的 ratios，再在归一化后的数据上计算目标比例
         this.repairSplitRatios(split);
@@ -314,7 +399,11 @@ let MonitorButtonProvider = class MonitorButtonProvider extends tabby_core_1.Too
         if (index < 0 || n < 2) {
             return;
         }
-        const desired = Math.min(0.45, Math.max(0.12, 400 / Math.max(1, window.innerWidth)));
+        const vertical = container.orientation === 'v';
+        const span = vertical ? window.innerHeight : window.innerWidth;
+        const desired = vertical
+            ? Math.min(0.45, Math.max(0.15, 300 / Math.max(1, span)))
+            : Math.min(0.45, Math.max(0.12, 400 / Math.max(1, span)));
         const othersSum = 1 - container.ratios[index];
         container.ratios = container.ratios.map((r, i) => {
             if (i === index) {
@@ -408,9 +497,981 @@ let MonitorButtonProvider = class MonitorButtonProvider extends tabby_core_1.Too
 };
 MonitorButtonProvider = __decorate([
     (0, core_1.Injectable)(),
-    __metadata("design:paramtypes", [typeof (_a = typeof tabby_core_1.AppService !== "undefined" && tabby_core_1.AppService) === "function" ? _a : Object, typeof (_b = typeof tabby_core_1.TabsService !== "undefined" && tabby_core_1.TabsService) === "function" ? _b : Object, typeof (_c = typeof tabby_core_1.HotkeysService !== "undefined" && tabby_core_1.HotkeysService) === "function" ? _c : Object, typeof (_d = typeof monitor_service_1.MonitorService !== "undefined" && monitor_service_1.MonitorService) === "function" ? _d : Object])
+    __metadata("design:paramtypes", [typeof (_a = typeof tabby_core_1.AppService !== "undefined" && tabby_core_1.AppService) === "function" ? _a : Object, typeof (_b = typeof tabby_core_1.TabsService !== "undefined" && tabby_core_1.TabsService) === "function" ? _b : Object, typeof (_c = typeof tabby_core_1.HotkeysService !== "undefined" && tabby_core_1.HotkeysService) === "function" ? _c : Object, typeof (_d = typeof monitor_service_1.MonitorService !== "undefined" && monitor_service_1.MonitorService) === "function" ? _d : Object, typeof (_e = typeof tabby_core_1.NotificationsService !== "undefined" && tabby_core_1.NotificationsService) === "function" ? _e : Object])
 ], MonitorButtonProvider);
 exports.MonitorButtonProvider = MonitorButtonProvider;
+
+
+/***/ },
+
+/***/ "./src/components/filePane.component.ts"
+/*!**********************************************!*\
+  !*** ./src/components/filePane.component.ts ***!
+  \**********************************************/
+(__unused_webpack_module, exports, __webpack_require__) {
+
+
+var __decorate = (this && this.__decorate) || function (decorators, target, key, desc) {
+    var c = arguments.length, r = c < 3 ? target : desc === null ? desc = Object.getOwnPropertyDescriptor(target, key) : desc, d;
+    if (typeof Reflect === "object" && typeof Reflect.decorate === "function") r = Reflect.decorate(decorators, target, key, desc);
+    else for (var i = decorators.length - 1; i >= 0; i--) if (d = decorators[i]) r = (c < 3 ? d(r) : c > 3 ? d(target, key, r) : d(target, key)) || r;
+    return c > 3 && r && Object.defineProperty(target, key, r), r;
+};
+var __metadata = (this && this.__metadata) || function (k, v) {
+    if (typeof Reflect === "object" && typeof Reflect.metadata === "function") return Reflect.metadata(k, v);
+};
+var _a, _b, _c, _d, _e, _f, _g;
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+exports.FilePaneComponent = void 0;
+const core_1 = __webpack_require__(/*! @angular/core */ "@angular/core");
+const tabby_core_1 = __webpack_require__(/*! tabby-core */ "tabby-core");
+const rxjs_1 = __webpack_require__(/*! rxjs */ "rxjs");
+const interfaces_1 = __webpack_require__(/*! ../interfaces */ "./src/interfaces.ts");
+const remoteProbe_1 = __webpack_require__(/*! ../services/remoteProbe */ "./src/services/remoteProbe.ts");
+const theme_1 = __webpack_require__(/*! ../theme */ "./src/theme.ts");
+const icons_1 = __webpack_require__(/*! ../icons */ "./src/icons.ts");
+/** 路径规范化：折叠 '.' / '..'，保证 '/' 开头的绝对路径 */
+function normalizePath(input) {
+    const out = [];
+    for (const part of (input !== null && input !== void 0 ? input : '').split('/')) {
+        if (!part || part === '.') {
+            continue;
+        }
+        if (part === '..') {
+            out.pop();
+        }
+        else {
+            out.push(part);
+        }
+    }
+    return '/' + out.join('/');
+}
+/** 拼接目录与名称为绝对路径 */
+function joinPath(dir, name) {
+    return normalizePath(`${dir}/${name}`);
+}
+/**
+ * 文件传输面板：以 Tabby 原生分屏插入到 SSH 会话**底部**（FinalShell 底部文件面板风格）。
+ * 左侧目录树（懒加载）+ 右侧文件列表（名称/类型/大小/修改时间/权限），
+ * 传输基于 tabby-ssh 的 SFTP 会话与 tabby-core 的文件选择/进度 UI，不占用终端交互会话。
+ */
+let FilePaneComponent = class FilePaneComponent extends tabby_core_1.BaseTabComponent {
+    /** 对应的 SSH 标签页（由 buttonProvider 通过 inputs 注入） */
+    set tab(value) {
+        this._tab = value;
+        this.sftp = null;
+        this.pathLoaded = false;
+        this.statusText = value ? '正在连接…' : '';
+        if (value) {
+            void this.ensureSftp(false);
+        }
+    }
+    get tab() {
+        return this._tab;
+    }
+    constructor(injector, platform, notifications, themes) {
+        super(injector);
+        this.platform = platform;
+        this.notifications = notifications;
+        this.themes = themes;
+        this.close = new core_1.EventEmitter();
+        this.newFolderInput = null;
+        /** 是否亮色主题（跟随 Tabby 亮/暗色切换） */
+        this.isLight = false;
+        this.sftp = null;
+        this.path = '/';
+        this.pathInput = '/';
+        this.files = [];
+        this.selected = null;
+        this.loading = false;
+        this.busy = false;
+        this.error = '';
+        this.statusText = '';
+        this.creating = false;
+        this.newName = '';
+        this.sortKey = 'name';
+        this.sortAsc = true;
+        this.root = { path: '/', name: '/', expanded: false, loading: false, children: null };
+        this._tab = null;
+        this.connecting = false;
+        this.pathLoaded = false;
+        this.navSeq = 0;
+        this.setTitle('文件传输');
+        this.icon = icons_1.FOLDER_ICON_SVG;
+        const updateTheme = () => { this.isLight = (0, theme_1.isLightTheme)(this.themes); };
+        updateTheme();
+        this.subscribeUntilDestroyed(this.themes.themeChanged$, updateTheme);
+        // SFTP 未就绪（连接中 / 断开重连）时每 2 秒静默重试，就绪后自动加载目录
+        this.subscribeUntilDestroyed((0, rxjs_1.interval)(2000), () => {
+            if (this._tab && !this.sftp && !this.connecting && !this.busy) {
+                void this.ensureSftp(true);
+            }
+        });
+    }
+    get hostLabel() {
+        var _a, _b, _c;
+        const o = (_b = (_a = this._tab) === null || _a === void 0 ? void 0 : _a.profile) === null || _b === void 0 ? void 0 : _b.options;
+        if (!(o === null || o === void 0 ? void 0 : o.host)) {
+            return '';
+        }
+        return `${o.user ? o.user + '@' : ''}${o.host}:${(_c = o.port) !== null && _c !== void 0 ? _c : 22}`;
+    }
+    get emptyText() {
+        if (!this._tab) {
+            return '未绑定 SSH 会话';
+        }
+        if (!this.sftp) {
+            return this.statusText || '等待 SSH 会话就绪…';
+        }
+        return '空目录';
+    }
+    /* ---------- SFTP 就绪与初始路径 ---------- */
+    /** 打开 SFTP 会话并加载初始目录（幂等；quiet 用于定时重试不弹错误通知） */
+    async ensureSftp(quiet) {
+        var _a;
+        if (this.connecting || this.sftp) {
+            return;
+        }
+        const session = (_a = this._tab) === null || _a === void 0 ? void 0 : _a.sshSession;
+        if (!(session === null || session === void 0 ? void 0 : session.open) || !session.openSFTP) {
+            this.statusText = '等待 SSH 会话就绪…';
+            return;
+        }
+        this.connecting = true;
+        try {
+            const sftp = await session.openSFTP();
+            this.sftp = sftp;
+            this.subscribeUntilDestroyed(sftp.closed$, () => {
+                if (this.sftp === sftp) {
+                    this.sftp = null;
+                    this.statusText = '连接已断开，正在重连…';
+                }
+            });
+            this.statusText = '';
+            this.error = '';
+            if (!this.pathLoaded) {
+                const initial = await this.detectInitialPath();
+                const ok = await this.navigate(initial);
+                this.pathLoaded = ok;
+            }
+            else {
+                // 断开重连：回到原路径重新拉取
+                await this.navigate(this.path);
+            }
+            if (this.root.children === null) {
+                void this.loadChildren(this.root);
+            }
+            this.root.expanded = true;
+        }
+        catch (err) {
+            if (quiet) {
+                this.statusText = '等待 SSH 会话就绪…';
+            }
+            else {
+                this.fail('打开 SFTP 失败', err);
+            }
+        }
+        finally {
+            this.connecting = false;
+        }
+    }
+    /** 初始路径：shell 集成上报的 cwd → exec pwd → '/' */
+    async detectInitialPath() {
+        var _a, _b, _c, _d, _e;
+        try {
+            const cwd = await ((_c = (_b = (_a = this._tab) === null || _a === void 0 ? void 0 : _a.session) === null || _b === void 0 ? void 0 : _b.getWorkingDirectory) === null || _c === void 0 ? void 0 : _c.call(_b));
+            if (cwd === null || cwd === void 0 ? void 0 : cwd.startsWith('/')) {
+                return cwd;
+            }
+        }
+        catch { /* 无 shell 集成时返回 null，继续回退 */ }
+        const session = (_d = this._tab) === null || _d === void 0 ? void 0 : _d.sshSession;
+        if (session === null || session === void 0 ? void 0 : session.open) {
+            try {
+                const out = await (0, remoteProbe_1.execRemoteCommand)(session, 'pwd -P', 6000);
+                const line = (_e = out.trim().split('\n').pop()) !== null && _e !== void 0 ? _e : '';
+                if (line.startsWith('/')) {
+                    return line;
+                }
+            }
+            catch { /* exec 不可用时回退根目录 */ }
+        }
+        return '/';
+    }
+    /* ---------- 目录浏览 ---------- */
+    /** 跳转到指定目录；返回是否成功 */
+    async navigate(input) {
+        const raw = (input !== null && input !== void 0 ? input : '').trim();
+        if (!raw) {
+            this.pathInput = this.path;
+            return false;
+        }
+        if (!this.sftp) {
+            await this.ensureSftp(false);
+            if (!this.sftp) {
+                return false;
+            }
+        }
+        const target = normalizePath(raw);
+        const seq = ++this.navSeq;
+        this.loading = true;
+        this.error = '';
+        try {
+            const entries = await this.sftp.readdir(target);
+            if (seq !== this.navSeq) {
+                return false; // 已有更新的跳转在途，放弃本次结果
+            }
+            this.path = target;
+            this.pathInput = target;
+            this.files = entries;
+            this.selected = null;
+            await this.expandTo(target);
+            return true;
+        }
+        catch (err) {
+            if (seq === this.navSeq) {
+                this.fail(`无法访问 ${target}`, err, false);
+            }
+            return false;
+        }
+        finally {
+            if (seq === this.navSeq) {
+                this.loading = false;
+            }
+        }
+    }
+    goUp() {
+        if (this.path === '/') {
+            return;
+        }
+        const parent = this.path.split('/').slice(0, -1).join('/') || '/';
+        void this.navigate(parent);
+    }
+    /** 刷新当前目录（同时使目录树对应节点的子级缓存失效） */
+    async refresh() {
+        if (!this.sftp) {
+            await this.ensureSftp(false);
+            if (!this.sftp) {
+                return;
+            }
+        }
+        const node = this.findNode(this.path);
+        if (node) {
+            node.children = null;
+            node.loading = false;
+            // 立即重载该节点子级，保持树的展开状态与实际内容一致
+            await this.loadChildren(node);
+        }
+        await this.navigate(this.path);
+    }
+    openItem(item) {
+        if (!item.isDirectory && !item.isSymlink) {
+            void this.downloadItem(item);
+            return;
+        }
+        void (async () => {
+            const ok = await this.navigate(item.fullPath);
+            if (!ok && item.isSymlink) {
+                // 符号链接指向文件时 readdir 会失败，退化为下载
+                this.error = '';
+                await this.downloadItem(item);
+            }
+        })();
+    }
+    /* ---------- 目录树 ---------- */
+    findNode(path) {
+        const walk = (node) => {
+            var _a;
+            if (!node) {
+                return null;
+            }
+            if (node.path === path) {
+                return node;
+            }
+            for (const child of (_a = node.children) !== null && _a !== void 0 ? _a : []) {
+                if (!child) {
+                    continue;
+                }
+                const hit = walk(child);
+                if (hit) {
+                    return hit;
+                }
+            }
+            return null;
+        };
+        return walk(this.root);
+    }
+    /** 懒加载某节点的子目录 */
+    async loadChildren(node) {
+        if (!this.sftp || node.loading) {
+            return;
+        }
+        node.loading = true;
+        try {
+            const entries = await this.sftp.readdir(node.path);
+            node.children = entries
+                .filter(e => e && e.isDirectory)
+                .map(e => ({ path: e.fullPath, name: e.name, expanded: false, loading: false, children: null }))
+                .sort((a, b) => a.name.localeCompare(b.name));
+        }
+        catch {
+            node.children = [];
+        }
+        finally {
+            node.loading = false;
+        }
+    }
+    /** 展开到指定路径（逐级加载，保证树上能看到当前目录） */
+    async expandTo(path) {
+        var _a;
+        let node = this.root;
+        node.expanded = true;
+        let current = '';
+        for (const part of path.split('/').filter(Boolean)) {
+            current += '/' + part;
+            if (node.children === null) {
+                await this.loadChildren(node);
+            }
+            const child = ((_a = node.children) !== null && _a !== void 0 ? _a : []).find(c => c && c.path === current);
+            if (!child) {
+                break;
+            }
+            child.expanded = true;
+            node = child;
+        }
+    }
+    onNodeClick(node) {
+        if (!node || this.busy) {
+            return;
+        }
+        const willExpand = !node.expanded;
+        node.expanded = willExpand;
+        if (willExpand && node.children === null) {
+            void this.loadChildren(node);
+        }
+        if (node.path !== this.path) {
+            void this.navigate(node.path);
+        }
+    }
+    /** 展开的目录树扁平视图（供模板 *ngFor 使用；每项均为现算对象，避免递归模板上下文问题） */
+    get visibleNodes() {
+        const out = [];
+        const walk = (node, level) => {
+            if (!node) {
+                return;
+            }
+            out.push({ node, level });
+            if (node.expanded && node.children) {
+                for (const child of node.children) {
+                    walk(child, level + 1);
+                }
+            }
+        };
+        walk(this.root, 0);
+        return out;
+    }
+    trackFlat(index, item) {
+        var _a, _b;
+        return (_b = (_a = item === null || item === void 0 ? void 0 : item.node) === null || _a === void 0 ? void 0 : _a.path) !== null && _b !== void 0 ? _b : `idx:${index}`;
+    }
+    /* ---------- 传输 ---------- */
+    async upload() {
+        if (this.busy || !this.sftp) {
+            return;
+        }
+        let transfers = [];
+        try {
+            transfers = await this.platform.startUpload({ multiple: true });
+        }
+        catch (err) {
+            this.fail('选择上传文件失败', err);
+            return;
+        }
+        await this.uploadEntries(transfers);
+    }
+    async uploadFolder() {
+        if (this.busy || !this.sftp) {
+            return;
+        }
+        try {
+            const root = await this.platform.startUploadDirectory();
+            await this.uploadEntries(root.getChildrens());
+        }
+        catch (err) {
+            this.fail('选择上传文件夹失败', err);
+        }
+    }
+    /** 拖放上传（放入列表/树区域即上传到当前目录） */
+    async onDrop(event) {
+        event.preventDefault();
+        if (this.busy || !this.sftp) {
+            return;
+        }
+        try {
+            const root = await this.platform.startUploadFromDragEvent(event, true);
+            await this.uploadEntries(root.getChildrens());
+        }
+        catch (err) {
+            this.fail('上传失败', err);
+        }
+    }
+    async uploadEntries(entries) {
+        if (!this.sftp || !entries.length) {
+            return;
+        }
+        this.busy = true;
+        this.error = '';
+        try {
+            for (const entry of entries) {
+                await this.uploadEntry(entry, this.path);
+            }
+            this.notifications.notice(`上传完成：${entries.length} 项`);
+            await this.refresh();
+        }
+        catch (err) {
+            this.fail('上传失败', err);
+        }
+        finally {
+            this.busy = false;
+            this.statusText = '';
+        }
+    }
+    async uploadEntry(entry, dirPath) {
+        const sftp = this.sftp;
+        if (!sftp) {
+            throw new Error('SFTP 连接已断开');
+        }
+        const target = joinPath(dirPath, entry.getName());
+        if (typeof entry.getChildrens === 'function') {
+            try {
+                await sftp.mkdir(target);
+            }
+            catch {
+                // 目标已存在时忽略，继续向内上传
+            }
+            for (const child of entry.getChildrens()) {
+                await this.uploadEntry(child, target);
+            }
+        }
+        else {
+            this.statusText = `正在上传 ${entry.getName()}…`;
+            await sftp.upload(target, entry);
+        }
+    }
+    downloadSelected() {
+        const item = this.selected;
+        if (!item) {
+            return;
+        }
+        if (item.isDirectory) {
+            void this.downloadFolder(item);
+        }
+        else {
+            void this.downloadItem(item);
+        }
+    }
+    async downloadItem(item) {
+        if (this.busy || !this.sftp) {
+            return;
+        }
+        let transfer = null;
+        try {
+            transfer = await this.platform.startDownload(item.name, item.mode, item.size);
+        }
+        catch (err) {
+            this.fail('创建下载任务失败', err);
+            return;
+        }
+        if (!transfer) {
+            return; // 用户取消了保存对话框
+        }
+        this.busy = true;
+        this.error = '';
+        this.statusText = `正在下载 ${item.name}…`;
+        try {
+            // SFTPSession.download 成功后关闭 transfer，失败时自动 setStatus/cancel
+            await this.sftp.download(item.fullPath, transfer);
+        }
+        catch (err) {
+            this.fail('下载失败', err);
+        }
+        finally {
+            this.busy = false;
+            this.statusText = '';
+        }
+    }
+    async downloadFolder(item) {
+        if (this.busy || !this.sftp) {
+            return;
+        }
+        const platformAny = this.platform;
+        if (typeof platformAny.startDownloadDirectory !== 'function') {
+            this.notifications.error('当前 Tabby 版本不支持文件夹下载', '请升级 Tabby，或改为逐个下载文件');
+            return;
+        }
+        let transfer = null;
+        try {
+            transfer = await platformAny.startDownloadDirectory(item.name, 0);
+        }
+        catch (err) {
+            this.fail('创建下载任务失败', err);
+            return;
+        }
+        if (!transfer) {
+            return; // 用户取消了目录选择对话框
+        }
+        this.busy = true;
+        this.error = '';
+        this.statusText = `正在下载文件夹 ${item.name}…`;
+        try {
+            await this.downloadDirRecursive(item.fullPath, '', transfer);
+            transfer.setStatus('');
+            transfer.setCompleted(true);
+            this.notifications.notice(`已下载文件夹 ${item.name}`);
+        }
+        catch (err) {
+            transfer.cancel();
+            this.fail('下载失败', err);
+        }
+        finally {
+            transfer.close();
+            this.busy = false;
+            this.statusText = '';
+        }
+    }
+    async downloadDirRecursive(dirPath, rel, transfer) {
+        const sftp = this.sftp;
+        if (!sftp) {
+            throw new Error('SFTP 连接已断开');
+        }
+        const entries = await sftp.readdir(dirPath);
+        for (const e of entries) {
+            if (transfer.isCancelled()) {
+                throw new Error('下载已取消');
+            }
+            const childRel = rel ? `${rel}/${e.name}` : e.name;
+            transfer.setStatus(childRel);
+            if (e.isDirectory) {
+                await transfer.createDirectory(childRel);
+                await this.downloadDirRecursive(e.fullPath, childRel, transfer);
+            }
+            else {
+                const fileTransfer = await transfer.createFile(childRel, e.mode, e.size);
+                await sftp.download(e.fullPath, fileTransfer);
+            }
+        }
+    }
+    /* ---------- 新建 / 删除 ---------- */
+    startCreateFolder() {
+        if (this.busy || !this.sftp) {
+            return;
+        }
+        this.creating = true;
+        this.newName = '';
+        setTimeout(() => { var _a; return (_a = this.newFolderInput) === null || _a === void 0 ? void 0 : _a.nativeElement.focus(); });
+    }
+    async confirmCreateFolder() {
+        const name = this.newName.trim();
+        if (!name) {
+            return;
+        }
+        if (name.includes('/')) {
+            this.notifications.error('文件夹名称不能包含 /');
+            return;
+        }
+        if (this.busy || !this.sftp) {
+            return;
+        }
+        this.busy = true;
+        try {
+            await this.sftp.mkdir(joinPath(this.path, name));
+            this.creating = false;
+            this.notifications.notice(`已创建文件夹 ${name}`);
+            await this.refresh();
+        }
+        catch (err) {
+            this.fail('新建文件夹失败', err);
+        }
+        finally {
+            this.busy = false;
+        }
+    }
+    async deleteSelected() {
+        const item = this.selected;
+        if (!item || this.busy || !this.sftp) {
+            return;
+        }
+        const result = await this.platform.showMessageBox({
+            type: 'warning',
+            message: `确定删除「${item.name}」吗？`,
+            detail: item.isDirectory ? '文件夹及其内容将被递归删除，不可恢复' : '文件删除后不可恢复',
+            buttons: ['删除', '取消'],
+            defaultId: 1,
+            cancelId: 1,
+        });
+        if (result.response !== 0) {
+            return;
+        }
+        this.busy = true;
+        this.error = '';
+        this.statusText = `正在删除 ${item.name}…`;
+        try {
+            if (item.isDirectory) {
+                await this.removeRecursive(item.fullPath);
+            }
+            else {
+                await this.sftp.unlink(item.fullPath);
+            }
+            this.selected = null;
+            this.notifications.notice(`已删除 ${item.name}`);
+            await this.refresh();
+        }
+        catch (err) {
+            this.fail('删除失败', err);
+        }
+        finally {
+            this.busy = false;
+            this.statusText = '';
+        }
+    }
+    /** SFTP 递归删除（先删子项再删目录，全程不经过 shell） */
+    async removeRecursive(path) {
+        const sftp = this.sftp;
+        if (!sftp) {
+            throw new Error('SFTP 连接已断开');
+        }
+        const entries = await sftp.readdir(path);
+        for (const e of entries) {
+            if (e.isDirectory) {
+                await this.removeRecursive(e.fullPath);
+            }
+            else {
+                await sftp.unlink(e.fullPath);
+            }
+        }
+        await sftp.rmdir(path);
+    }
+    /* ---------- 展示辅助 ---------- */
+    setSort(key) {
+        if (this.sortKey === key) {
+            this.sortAsc = !this.sortAsc;
+        }
+        else {
+            this.sortKey = key;
+            this.sortAsc = true;
+        }
+    }
+    sortMark(key) {
+        if (this.sortKey !== key) {
+            return '';
+        }
+        return this.sortAsc ? ' ↑' : ' ↓';
+    }
+    /** 目录恒在前，其余按当前排序键排列 */
+    get sortedFiles() {
+        const cmp = (a, b) => {
+            let d = 0;
+            if (this.sortKey === 'size') {
+                d = a.size - b.size;
+            }
+            else if (this.sortKey === 'modified') {
+                d = a.modified.getTime() - b.modified.getTime();
+            }
+            else {
+                d = a.name.localeCompare(b.name);
+            }
+            return this.sortAsc ? d : -d;
+        };
+        const dirs = this.files.filter(f => f.isDirectory).sort(cmp);
+        const rest = this.files.filter(f => !f.isDirectory).sort(cmp);
+        return [...dirs, ...rest];
+    }
+    trackFile(index, file) {
+        return file.fullPath;
+    }
+    iconOf(file) {
+        if (file.isDirectory) {
+            return '📁';
+        }
+        if (file.isSymlink) {
+            return '🔗';
+        }
+        return '📄';
+    }
+    typeOf(file) {
+        if (file.isDirectory) {
+            return '文件夹';
+        }
+        if (file.isSymlink) {
+            return '符号链接';
+        }
+        const m = /\.([^.]+)$/.exec(file.name);
+        return m ? m[1].toUpperCase() : '文件';
+    }
+    fmtBytes(bytes) {
+        if (bytes === null || bytes === undefined) {
+            return '-';
+        }
+        const units = ['B', 'KB', 'MB', 'GB', 'TB', 'PB'];
+        let value = bytes;
+        let unit = 0;
+        while (value >= 1024 && unit < units.length - 1) {
+            value /= 1024;
+            unit++;
+        }
+        return `${value.toFixed(value >= 100 || unit === 0 ? 0 : 1)}${units[unit]}`;
+    }
+    fmtTime(value) {
+        const d = value instanceof Date ? value : new Date(value);
+        if (isNaN(d.getTime())) {
+            return '-';
+        }
+        const p = (n) => String(n).padStart(2, '0');
+        return `${d.getFullYear()}/${p(d.getMonth() + 1)}/${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
+    }
+    /** POSIX 权限位 → rwx 串（含 setuid/setgid/sticky 与类型位） */
+    modeString(mode) {
+        const bits = ['---', '--x', '-w-', '-wx', 'r--', 'r-x', 'rw-', 'rwx'];
+        const type = mode & 0o170000;
+        let out = type === 0o040000 ? 'd' : type === 0o120000 ? 'l' : '-';
+        for (let shift = 6; shift >= 0; shift -= 3) {
+            out += bits[(mode >> shift) & 7];
+        }
+        const special = (index, ch, execBit) => {
+            out = out.slice(0, index) + (mode & execBit ? ch : ch.toUpperCase()) + out.slice(index + 1);
+        };
+        if (mode & 0o4000) {
+            special(3, 's', 0o100);
+        }
+        if (mode & 0o2000) {
+            special(6, 's', 0o010);
+        }
+        if (mode & 0o1000) {
+            special(9, 't', 0o001);
+        }
+        return out;
+    }
+    fail(what, err, notify = true) {
+        const message = (err === null || err === void 0 ? void 0 : err.message) ? String(err.message) : String(err);
+        this.error = `${what}: ${message}`;
+        if (notify) {
+            this.notifications.error(`${what}失败`, message);
+        }
+    }
+};
+__decorate([
+    (0, core_1.Input)(),
+    __metadata("design:type", typeof (_e = typeof interfaces_1.SSHTabLike !== "undefined" && interfaces_1.SSHTabLike) === "function" ? _e : Object),
+    __metadata("design:paramtypes", [typeof (_f = typeof interfaces_1.SSHTabLike !== "undefined" && interfaces_1.SSHTabLike) === "function" ? _f : Object])
+], FilePaneComponent.prototype, "tab", null);
+__decorate([
+    (0, core_1.Output)(),
+    __metadata("design:type", Object)
+], FilePaneComponent.prototype, "close", void 0);
+__decorate([
+    (0, core_1.ViewChild)('newFolderInput'),
+    __metadata("design:type", typeof (_g = typeof core_1.ElementRef !== "undefined" && core_1.ElementRef) === "function" ? _g : Object)
+], FilePaneComponent.prototype, "newFolderInput", void 0);
+FilePaneComponent = __decorate([
+    (0, core_1.Component)({
+        selector: 'sm-file-pane',
+        template: `
+        <div class="fp-panel" [class.fp-light]='isLight'>
+            <div class="fp-head">
+                <strong class="fp-title">文件传输</strong>
+                <span class="fp-host" [title]='hostLabel'>{{ hostLabel }}</span>
+                <span class="fp-msg fp-muted" [class.fp-error]='error' *ngIf='error || statusText'>
+                    {{ error || statusText }}
+                </span>
+                <span class="fp-spacer"></span>
+                <button class="btn btn-sm btn-secondary" (click)='refresh()' [disabled]='busy || !sftp'>刷新</button>
+                <button class="btn btn-sm btn-secondary" (click)='close.emit()' title='关闭面板'>✕</button>
+            </div>
+
+            <div class="fp-path">
+                <button class="btn btn-sm btn-secondary" (click)='goUp()' [disabled]='busy || path === "/"'
+                        title='上级目录'>↑</button>
+                <input class="form-control form-control-sm fp-input" [(ngModel)]='pathInput'
+                       (keyup.enter)='navigate(pathInput)' (blur)='pathInput = path'
+                       spellcheck='false' placeholder='输入远程路径后回车跳转' [title]='path'>
+            </div>
+
+            <div class="fp-actions">
+                <button class="btn btn-sm btn-primary" (click)='upload()' [disabled]='busy || !sftp'>上传文件</button>
+                <button class="btn btn-sm btn-primary" (click)='uploadFolder()' [disabled]='busy || !sftp'>上传文件夹</button>
+                <button class="btn btn-sm btn-primary" (click)='downloadSelected()' [disabled]='busy || !sftp || !selected'>下载</button>
+                <button class="btn btn-sm btn-secondary" (click)='startCreateFolder()' [disabled]='busy || !sftp'>新建文件夹</button>
+                <button class="btn btn-sm btn-secondary" (click)='deleteSelected()' [disabled]='busy || !sftp || !selected'>删除</button>
+                <span class="fp-spacer"></span>
+                <span class="fp-muted fp-hint" *ngIf='selected' [title]='selected.name'>{{ selected.name }}</span>
+            </div>
+
+            <div class="fp-newfolder" *ngIf='creating'>
+                <input #newFolderInput class="form-control form-control-sm fp-input" [(ngModel)]='newName'
+                       (keyup.enter)='confirmCreateFolder()' (keyup.escape)='creating = false'
+                       spellcheck='false' placeholder='新文件夹名称（回车创建，Esc 取消）'>
+                <button class="btn btn-sm btn-primary" (click)='confirmCreateFolder()'>创建</button>
+                <button class="btn btn-sm btn-secondary" (click)='creating = false'>取消</button>
+            </div>
+
+            <div class="fp-body" (drop)='onDrop($event)' (dragover)='$event.preventDefault()'>
+                <div class="fp-tree">
+                    <div class="fp-node" *ngFor='let item of visibleNodes; trackBy: trackFlat'
+                         [style.paddingLeft.px]='item.level * 14 + 4'
+                         [class.fp-active]='item.node.path === path'
+                         (click)='onNodeClick(item.node)'>
+                        <span class="fp-arrow" [class.fp-arrow-open]='item.node.expanded'>{{ item.node.loading ? '…' : '▸' }}</span>
+                        <span class="fp-node-name" [title]='item.node.path'>{{ item.node.name }}</span>
+                    </div>
+                </div>
+                <div class="fp-list">
+                    <table class="fp-table">
+                        <thead>
+                            <tr>
+                                <th class="fp-c-name" (click)='setSort("name")'>文件名{{ sortMark("name") }}</th>
+                                <th class="fp-c-type">类型</th>
+                                <th class="fp-c-size" (click)='setSort("size")'>大小{{ sortMark("size") }}</th>
+                                <th class="fp-c-time" (click)='setSort("modified")'>修改时间{{ sortMark("modified") }}</th>
+                                <th class="fp-c-mode">权限</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            <tr *ngFor='let f of sortedFiles; trackBy: trackFile'
+                                [class.fp-active]='selected === f'
+                                (click)='selected = f'
+                                (dblclick)='openItem(f)'>
+                                <td class="fp-c-name">
+                                    <span class="fp-ico">{{ iconOf(f) }}</span>
+                                    <span class="fp-name" [title]='f.name'>{{ f.name }}</span>
+                                </td>
+                                <td class="fp-c-type">{{ typeOf(f) }}</td>
+                                <td class="fp-c-size" [title]='f.isDirectory ? "" : f.size + " bytes"'>
+                                    {{ f.isDirectory ? "" : fmtBytes(f.size) }}
+                                </td>
+                                <td class="fp-c-time">{{ fmtTime(f.modified) }}</td>
+                                <td class="fp-c-mode" [title]='modeString(f.mode)'>{{ modeString(f.mode) }}</td>
+                            </tr>
+                        </tbody>
+                    </table>
+                    <div class="fp-empty" *ngIf='loading'>加载中…</div>
+                    <div class="fp-empty" *ngIf='!loading && !files.length'>{{ emptyText }}</div>
+                </div>
+            </div>
+
+            <div class="fp-foot">
+                <span class="fp-path-label" [title]='path'>{{ path }}</span>
+                <span class="fp-muted">{{ files.length }} 项</span>
+                <span class="fp-muted" *ngIf='selected'>选中：{{ selected.name }}</span>
+            </div>
+        </div>
+    `,
+        styles: [`
+        :host {
+            display: flex;
+            flex-direction: column;
+            height: 100%;
+            overflow: hidden;
+            background: #232326;
+            color: #eee;
+        }
+        :host(.fp-light) {
+            background: #f2f3f5;
+            color: #1e1e1e;
+        }
+        .fp-panel { display: flex; flex-direction: column; height: 100%; overflow: hidden; }
+        .fp-head {
+            display: flex; align-items: center; gap: 8px;
+            padding: 6px 10px; flex: none;
+            border-bottom: 1px solid rgba(127, 127, 127, .25);
+            user-select: none;
+        }
+        .fp-title { font-size: 13px; }
+        .fp-host {
+            font-size: 12px; opacity: .85; max-width: 180px;
+            overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+        }
+        .fp-msg {
+            font-size: 11px; overflow: hidden; text-overflow: ellipsis;
+            white-space: nowrap; max-width: 50%;
+        }
+        .fp-error { color: #e57373; }
+        .fp-spacer { flex: 1; }
+        .fp-muted { opacity: .6; font-size: 11px; }
+        .fp-path, .fp-actions, .fp-newfolder {
+            display: flex; align-items: center; gap: 6px;
+            padding: 6px 10px 0; flex: none;
+        }
+        .fp-actions { padding-top: 6px; }
+        .fp-newfolder { padding-bottom: 2px; }
+        .fp-input { flex: 1; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; }
+        .fp-hint { max-width: 40%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        .fp-body {
+            display: flex; flex: 1; min-height: 0;
+            margin-top: 6px;
+            border-top: 1px solid rgba(127, 127, 127, .25);
+        }
+        .fp-tree {
+            width: 170px; flex: none; overflow: auto;
+            padding: 4px 0; user-select: none;
+            border-right: 1px solid rgba(127, 127, 127, .25);
+        }
+        .fp-node {
+            display: flex; align-items: center; gap: 4px;
+            font-size: 12px; line-height: 20px; cursor: pointer;
+            white-space: nowrap; overflow: hidden;
+        }
+        .fp-node:hover { background: rgba(127, 127, 127, .18); }
+        .fp-node.fp-active > .fp-node-name { color: #64b5f6; font-weight: 600; }
+        .fp-arrow { width: 12px; flex: none; opacity: .7; transition: transform .12s; text-align: center; }
+        .fp-arrow-open { transform: rotate(90deg); }
+        .fp-node-name { overflow: hidden; text-overflow: ellipsis; }
+        .fp-list { flex: 1; min-width: 0; overflow: auto; position: relative; }
+        .fp-table { width: 100%; border-collapse: collapse; font-size: 12px; table-layout: fixed; }
+        .fp-table th {
+            position: sticky; top: 0; z-index: 1;
+            text-align: left; font-weight: 600; opacity: .85;
+            padding: 4px 8px; cursor: default; user-select: none;
+            background: #2b2b2e;
+            border-bottom: 1px solid rgba(127, 127, 127, .3);
+        }
+        .fp-table th:not(.fp-c-type):not(.fp-c-mode) { cursor: pointer; }
+        .fp-table td {
+            padding: 2px 8px; white-space: nowrap;
+            overflow: hidden; text-overflow: ellipsis;
+        }
+        .fp-table tbody tr:hover { background: rgba(127, 127, 127, .14); }
+        .fp-table tbody tr.fp-active { background: rgba(76, 175, 80, .28); }
+        .fp-c-name { max-width: 0; width: 45%; }
+        .fp-c-type { width: 84px; }
+        .fp-c-size { width: 84px; text-align: right; font-variant-numeric: tabular-nums; }
+        .fp-c-time { width: 132px; font-variant-numeric: tabular-nums; }
+        .fp-c-mode { width: 104px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+        .fp-ico { margin-right: 6px; }
+        .fp-name { vertical-align: bottom; }
+        .fp-empty {
+            padding: 24px 12px; text-align: center;
+            opacity: .6; font-size: 12px;
+        }
+        .fp-foot {
+            display: flex; align-items: center; gap: 12px;
+            padding: 4px 10px; flex: none; font-size: 11px;
+            border-top: 1px solid rgba(127, 127, 127, .25);
+            user-select: none;
+        }
+        .fp-path-label {
+            flex: 1; font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+            overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+        }
+        /* 亮色主题：跟随 Tabby 亮/暗色切换（类挂在 .fp-panel 上，由模板 [class.fp-light] 标记） */
+        .fp-panel.fp-light .fp-table th { background: #e8eaed; }
+        .fp-panel.fp-light .fp-table tbody tr.fp-active { background: rgba(25, 118, 210, .18); }
+        .fp-panel.fp-light .fp-node.fp-active > .fp-node-name { color: #1565c0; }
+        .fp-panel.fp-light .fp-error { color: #c62828; }
+    `],
+    }),
+    __metadata("design:paramtypes", [typeof (_a = typeof core_1.Injector !== "undefined" && core_1.Injector) === "function" ? _a : Object, typeof (_b = typeof tabby_core_1.PlatformService !== "undefined" && tabby_core_1.PlatformService) === "function" ? _b : Object, typeof (_c = typeof tabby_core_1.NotificationsService !== "undefined" && tabby_core_1.NotificationsService) === "function" ? _c : Object, typeof (_d = typeof tabby_core_1.ThemesService !== "undefined" && tabby_core_1.ThemesService) === "function" ? _d : Object])
+], FilePaneComponent);
+exports.FilePaneComponent = FilePaneComponent;
 
 
 /***/ },
@@ -1232,6 +2293,7 @@ class MonitorConfigProvider extends tabby_core_1.ConfigProvider {
             },
             hotkeys: {
                 'open-server-monitor': null,
+                'open-file-transfer': null,
             },
         };
     }
@@ -1256,6 +2318,7 @@ class MonitorHotkeysProvider extends tabby_core_1.HotkeyProvider {
     provide() {
         return Promise.resolve([
             { id: 'open-server-monitor', name: '打开服务器状态监控' },
+            { id: 'open-file-transfer', name: '打开文件传输面板' },
         ]);
     }
 }
@@ -1272,10 +2335,14 @@ exports.MonitorHotkeysProvider = MonitorHotkeysProvider;
 
 
 Object.defineProperty(exports, "__esModule", ({ value: true }));
-exports.MONITOR_ICON_SVG = void 0;
+exports.FOLDER_ICON_SVG = exports.MONITOR_ICON_SVG = void 0;
 /** 工具栏 / 标签页 / 设置页共用的 SVG 图标（三根柱状图，监控/心率风格） */
 exports.MONITOR_ICON_SVG = '<svg viewBox="0 0 512 512" xmlns="http://www.w3.org/2000/svg" class="svg-inline--fa" aria-hidden="true">'
     + '<path fill="currentColor" d="M48 288a16 16 0 0 1 16-16h64a16 16 0 0 1 16 16v144a16 16 0 0 1-16 16H64a16 16 0 0 1-16-16V288zm160-128a16 16 0 0 1 16-16h64a16 16 0 0 1 16 16v272a16 16 0 0 1-16 16h-64a16 16 0 0 1-16-16V160zm160-96a16 16 0 0 1 16-16h64a16 16 0 0 1 16 16v368a16 16 0 0 1-16 16h-64a16 16 0 0 1-16-16V64z"/>'
+    + '</svg>';
+/** 文件传输面板 / 工具栏按钮共用的 SVG 图标（文件夹） */
+exports.FOLDER_ICON_SVG = '<svg viewBox="0 0 512 512" xmlns="http://www.w3.org/2000/svg" class="svg-inline--fa" aria-hidden="true">'
+    + '<path fill="currentColor" d="M48 144a32 32 0 0 1 32-32h118l52 48h184a32 32 0 0 1 32 32v224a32 32 0 0 1-32 32H80a32 32 0 0 1-32-32V144z"/>'
     + '</svg>';
 
 
@@ -1318,7 +2385,7 @@ var __importStar = (this && this.__importStar) || function (mod) {
     return result;
 };
 Object.defineProperty(exports, "__esModule", ({ value: true }));
-exports.MonitorPaneComponent = exports.MonitorCardComponent = exports.MonitorService = exports.MonitorTabComponent = void 0;
+exports.FilePaneComponent = exports.MonitorPaneComponent = exports.MonitorCardComponent = exports.MonitorService = exports.MonitorTabComponent = void 0;
 const core_1 = __webpack_require__(/*! @angular/core */ "@angular/core");
 const common_1 = __webpack_require__(/*! @angular/common */ "@angular/common");
 const forms_1 = __webpack_require__(/*! @angular/forms */ "@angular/forms");
@@ -1337,6 +2404,8 @@ const monitorCard_component_1 = __webpack_require__(/*! ./components/monitorCard
 Object.defineProperty(exports, "MonitorCardComponent", { enumerable: true, get: function () { return monitorCard_component_1.MonitorCardComponent; } });
 const monitorPane_component_1 = __webpack_require__(/*! ./components/monitorPane.component */ "./src/components/monitorPane.component.ts");
 Object.defineProperty(exports, "MonitorPaneComponent", { enumerable: true, get: function () { return monitorPane_component_1.MonitorPaneComponent; } });
+const filePane_component_1 = __webpack_require__(/*! ./components/filePane.component */ "./src/components/filePane.component.ts");
+Object.defineProperty(exports, "FilePaneComponent", { enumerable: true, get: function () { return filePane_component_1.FilePaneComponent; } });
 let ServerMonitorModule = class ServerMonitorModule {
 };
 ServerMonitorModule = __decorate([
@@ -1358,6 +2427,7 @@ ServerMonitorModule = __decorate([
             monitorSettings_component_1.MonitorSettingsComponent,
             monitorCard_component_1.MonitorCardComponent,
             monitorPane_component_1.MonitorPaneComponent,
+            filePane_component_1.FilePaneComponent,
         ],
     })
 ], ServerMonitorModule);

@@ -1,4 +1,5 @@
 import type { Observable } from 'rxjs'
+import type { FileDownload, FileUpload } from 'tabby-core'
 
 /** 单个挂载点的磁盘占用（df -kP 输出，单位已换算为字节） */
 export interface DiskInfo {
@@ -83,6 +84,36 @@ export interface ExecSSHClient {
 export interface SSHTabSession {
     open: boolean
     ssh: ExecSSHClient|null
+    /** 打开 SFTP 会话（tabby-ssh SSHSession.openSFTP，文件传输面板使用） */
+    openSFTP?: () => Promise<SFTPSessionLike>
+}
+
+/**
+ * 以下为对 tabby-ssh SFTPSession / SFTPFile 的结构化（duck-typing）描述，
+ * 与 ExecChannel 同理，避免在运行时硬依赖 tabby-ssh 模块。
+ */
+export interface SFTPFileLike {
+    name: string
+    fullPath: string
+    isDirectory: boolean
+    isSymlink: boolean
+    /** POSIX 权限位（含文件类型位） */
+    mode: number
+    size: number
+    modified: Date
+}
+
+export interface SFTPSessionLike {
+    closed$: Observable<void>
+    readdir (p: string): Promise<SFTPFileLike[]>
+    stat (p: string): Promise<SFTPFileLike>
+    mkdir (p: string): Promise<void>
+    /** 仅删除空目录 */
+    rmdir (p: string): Promise<void>
+    unlink (p: string): Promise<void>
+    rename (oldPath: string, newPath: string): Promise<void>
+    upload (path: string, transfer: FileUpload): Promise<void>
+    download (path: string, transfer: FileDownload): Promise<void>
 }
 
 export interface SSHTabProfileOptions {
@@ -94,4 +125,6 @@ export interface SSHTabProfileOptions {
 export interface SSHTabLike {
     profile?: { type?: string, options?: SSHTabProfileOptions }
     sshSession: SSHTabSession|null
+    /** 终端 shell 会话（取初始工作目录用；无 shell 集成时返回 null） */
+    session?: { open?: boolean, getWorkingDirectory?: () => Promise<string|null> }
 }
