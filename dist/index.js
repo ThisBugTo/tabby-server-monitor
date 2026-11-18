@@ -37,27 +37,21 @@ let MonitorButtonProvider = class MonitorButtonProvider extends tabby_core_1.Too
         this.app = app;
         this.tabsService = tabsService;
         this.monitor = monitor;
-        /** 当前监控分屏面板（单实例，跟随活动 SSH 会话移动，对应原浮动窗的单实例行为） */
-        this.pane = null;
-        /** 打开/移动面板期间屏蔽 activeTabChange 跟随逻辑，避免重入 */
-        this.busy = false;
+        /** 每个 SSH 标签页固定持有的监控面板（一窗一面板，不跨窗口移动） */
+        this.panes = new Map();
+        /** 已挂载 tabAdded 监听的分屏（避免重复订阅） */
+        this.watchedSplits = new WeakSet();
         hotkeys.hotkey$.subscribe(hotkey => {
             if (hotkey === 'open-server-monitor') {
                 void this.open();
             }
         });
-        // 切换标签页时，面板跟随切换到新的 SSH 会话所在的分屏（对应原浮动窗的跟随换绑行为）
+        // 切换标签页时只修复分屏布局并补挂分屏监听；面板按 SSH 标签固定绑定，不跟随活动窗口移动
         this.app.activeTabChange$.subscribe(tab => {
             // Tabby 重启恢复分屏后 ratios 可能损坏（终端被挤压/右侧留白），切换时立即修复
             if (tab instanceof tabby_core_1.SplitTabComponent) {
                 this.repairSplitRatios(tab);
-            }
-            if (!this.pane || this.busy) {
-                return;
-            }
-            const sshProfileTab = this.findSSHProfileTabIn(tab);
-            if (sshProfileTab) {
-                void this.movePaneTo(sshProfileTab);
+                this.watchSplit(tab);
             }
         });
         this.monitor.targets$.subscribe(targets => {
@@ -67,7 +61,7 @@ let MonitorButtonProvider = class MonitorButtonProvider extends tabby_core_1.Too
                 this.repairSplitRatios(active);
             }
         });
-        // 新开（含重启恢复）的 SSH 标签就绪后，立即在其左侧自动打开监控面板
+        // 新开（含重启恢复）的 SSH 标签就绪后，立即在其左侧打开专属监控面板
         this.app.tabOpened$.subscribe(tab => this.autoOpenFor(tab));
         // 插件构造晚于标签恢复时，补扫已打开的标签
         for (const tab of [...this.app.tabs]) {
@@ -84,30 +78,28 @@ let MonitorButtonProvider = class MonitorButtonProvider extends tabby_core_1.Too
             }];
     }
     async open() {
-        this.busy = true;
-        try {
-            const sshTab = this.findActiveSSHTab();
-            if (!sshTab) {
-                // 没有 SSH 会话时退回为独立标签页
-                this.openStandaloneTab();
-                return;
-            }
-            await this.togglePane(sshTab);
+        const sshTab = this.findActiveSSHTab();
+        if (!sshTab) {
+            // 没有 SSH 会话时退回为独立标签页
+            this.openStandaloneTab();
+            return;
         }
-        finally {
-            this.busy = false;
-        }
+        await this.togglePane(sshTab);
     }
-    /** 新开/恢复的 SSH 标签就绪后自动打开监控面板（受设置开关控制；重复触发由 movePaneTo 幂等去重） */
+    /** 新开/恢复的 SSH 标签就绪后，为其中每个 SSH 会话自动打开专属面板（受设置开关控制；panes 幂等去重） */
     autoOpenFor(tab) {
         const settings = this.monitor.settings;
         if (!settings.enabled || !settings.monitorSSHTabs) {
             return;
         }
         const tryOpen = () => {
-            const sshTab = this.findSSHProfileTabIn(tab);
-            if (sshTab) {
-                void this.movePaneTo(sshTab);
+            if (tab instanceof tabby_core_1.SplitTabComponent) {
+                this.watchSplit(tab);
+            }
+            for (const sshTab of this.sshTabsIn(tab)) {
+                if (!this.panes.has(sshTab)) {
+                    void this.openPaneFor(sshTab);
+                }
             }
         };
         if (!(tab instanceof tabby_core_1.SplitTabComponent)) {
@@ -122,68 +114,106 @@ let MonitorButtonProvider = class MonitorButtonProvider extends tabby_core_1.Too
             tab.initialized$.pipe((0, operators_1.take)(1)).subscribe(tryOpen);
         }
     }
-    /** 在 SSH 会话左侧插入/关闭监控分屏面板（只展示该会话的服务器） */
+    /** 给定标签（或其所在的分屏）内的全部 SSH 会话标签 */
+    sshTabsIn(tab) {
+        if (this.isSshProfileTab(tab)) {
+            return [tab];
+        }
+        if (tab instanceof tabby_core_1.SplitTabComponent) {
+            return tab.getAllTabs().filter((t) => this.isSshProfileTab(t));
+        }
+        return [];
+    }
+    /**
+     * 监控指定分屏：分屏内新增的 SSH 会话（复制/拖入）自动补开专属面板；
+     * 首次挂载时对分屏内已有的 SSH 会话补开一次（幂等，已手动关闭的不会被重开——挂载只发生一次）。
+     */
+    watchSplit(split) {
+        if (this.watchedSplits.has(split)) {
+            return;
+        }
+        this.watchedSplits.add(split);
+        split.tabAdded$.pipe((0, operators_1.takeUntil)(split.destroyed$)).subscribe(tab => {
+            const settings = this.monitor.settings;
+            if (settings.enabled && settings.monitorSSHTabs && this.isSshProfileTab(tab) && !this.panes.has(tab)) {
+                void this.openPaneFor(tab);
+            }
+        });
+        const settings = this.monitor.settings;
+        if (settings.enabled && settings.monitorSSHTabs) {
+            for (const sshTab of this.sshTabsIn(split)) {
+                if (!this.panes.has(sshTab)) {
+                    void this.openPaneFor(sshTab);
+                }
+            }
+        }
+    }
+    /** 开关指定 SSH 会话自己的监控面板（每个窗口只关联自己的面板） */
     async togglePane(sshTab) {
         var _a;
-        const targetId = this.targetIdFor(sshTab);
-        const split = this.splitOf(sshTab);
-        if (!split) {
+        const existing = this.panes.get(sshTab);
+        if (existing) {
+            // 该会话已有面板：再次点击关闭
+            this.closePane(existing);
             return;
         }
-        if (this.pane && this.pane.parent === split && this.pane.targetId === targetId) {
-            // 面板已绑定该会话并位于其左侧：再次点击关闭
-            this.closePane(this.pane);
-            return;
-        }
-        // 打开/换绑：先切到目标分屏，保证面板可见（原浮窗可悬浮在任意标签页上，分屏必须可见）
+        // 打开：先切到目标分屏，保证面板可见
         const top = (_a = sshTab.topmostParent) !== null && _a !== void 0 ? _a : sshTab;
         if (top !== this.app.activeTab) {
             this.app.selectTab(top);
         }
-        await this.movePaneTo(sshTab);
+        await this.openPaneFor(sshTab);
     }
-    /** 把面板创建/移动到目标 SSH 会话所在分屏的左侧，并换绑到该会话 */
-    async movePaneTo(sshTab) {
-        var _a;
-        const split = this.splitOf(sshTab);
-        if (!split) {
+    /** 在指定 SSH 会话左侧创建该会话专属的监控面板（一窗一面板，不跨窗口移动） */
+    async openPaneFor(sshTab) {
+        if (this.panes.has(sshTab)) {
             return;
         }
         const targetId = this.targetIdFor(sshTab);
-        let pane;
-        if (this.pane) {
-            const existing = this.pane;
-            pane = existing;
-            if (existing.targetId !== targetId) {
-                existing.targetId = targetId; // setter 会立即按缓存目标列表换绑
+        const pane = this.tabsService.create({ type: monitorPane_component_1.MonitorPaneComponent, inputs: { targetId } });
+        // 先占位：splitOf / tabAdded 触发的重入会因 has() 直接跳过，不会重复开面板
+        this.panes.set(sshTab, pane);
+        pane.destroyed$.subscribe(() => {
+            if (this.panes.get(sshTab) === pane) {
+                this.panes.delete(sshTab); // 面板所在分屏被整体关闭时同步清理
             }
-            if (existing.parent === split) {
-                this.monitor.refresh();
-                return;
-            }
-            // 单实例：先从原分屏摘除，再插入到目标分屏左侧
-            ;
-            (_a = existing.parent) === null || _a === void 0 ? void 0 : _a.removeTab(existing);
-        }
-        else {
-            const created = this.tabsService.create({ type: monitorPane_component_1.MonitorPaneComponent, inputs: { targetId } });
-            pane = created;
-            this.pane = created;
-            created.destroyed$.subscribe(() => {
-                if (this.pane === created) {
-                    this.pane = null; // 面板所在分屏被整体关闭时同步清理引用
+        });
+        pane.close.subscribe(() => this.closePane(pane));
+        // SSH 标签被单独关闭时延迟收掉它的孤儿面板（整窗关闭时面板已随分屏销毁，此时查不到即跳过）
+        sshTab.destroyed$.pipe((0, operators_1.take)(1)).subscribe(() => {
+            setImmediate(() => {
+                const orphan = this.panes.get(sshTab);
+                if (orphan === null || orphan === void 0 ? void 0 : orphan.parent) {
+                    this.closePane(orphan);
                 }
             });
-            created.close.subscribe(() => this.closePane(created));
+        });
+        const split = this.splitOf(sshTab);
+        if (!split) {
+            this.panes.delete(sshTab);
+            pane.destroy();
+            return;
         }
-        await split.addTab(pane, sshTab, 'l');
+        this.watchSplit(split);
+        try {
+            await split.addTab(pane, sshTab, 'l');
+        }
+        catch (err) {
+            console.error('[server-monitor] 插入监控面板失败', err);
+            this.panes.delete(sshTab);
+            pane.destroy();
+            return;
+        }
         this.fitPaneRatio(split, pane);
         this.monitor.refresh();
         // addTab 内部会把焦点切到新插入的面板，随后交还给 SSH 终端（保持不抢输入焦点的体验）
         setImmediate(() => {
             if (pane.parent === split) {
+                // 把分屏内焦点交还 SSH 终端：split.focus 不检查分屏是否为当前活动标签，
+                // 非活动分屏会留下 hasFocus=true（粘贴热键会广播到所有 hasFocus 的终端），由下方清理
                 split.focus(sshTab);
             }
+            this.blurInactiveTopTabs();
         });
     }
     /** 关闭面板：从分屏摘除并销毁组件（removeTab 只摘视图，不销毁实例） */
@@ -191,8 +221,36 @@ let MonitorButtonProvider = class MonitorButtonProvider extends tabby_core_1.Too
         const split = pane.parent;
         if (split) {
             split.removeTab(pane);
+            this.blurInactiveTopTabs();
         }
         pane.destroy();
+    }
+    /**
+     * 清理非活动顶层标签中残留的 hasFocus。
+     * Tabby 的 addTab/removeTab/split.focus 在非活动分屏里也会 emitFocused，而 AppService.selectTab
+     * 只 blur 切换前的活动标签，清不掉这些残留；粘贴热键（⌘-V）会广播给所有 hasFocus 的终端标签，
+     * 导致“在一个窗口粘贴，所有后台 SSH 窗口都收到命令”。
+     */
+    blurInactiveTopTabs() {
+        const active = this.app.activeTab;
+        const clear = (tab) => {
+            if (tab instanceof tabby_core_1.SplitTabComponent) {
+                if (tab.hasFocus) {
+                    tab.emitBlurred(); // 分屏的 blurred$ 会同时清掉其所有子标签
+                }
+                for (const child of tab.getAllTabs()) {
+                    clear(child);
+                }
+            }
+            else if (tab.hasFocus) {
+                tab.emitBlurred();
+            }
+        };
+        for (const tab of this.app.tabs) {
+            if (tab !== active) {
+                clear(tab);
+            }
+        }
     }
     /**
      * 修复分屏恢复后 ratios 损坏的状态：Tabby 恢复时若子标签（如本插件面板，无恢复令牌）被丢弃，
@@ -276,17 +334,10 @@ let MonitorButtonProvider = class MonitorButtonProvider extends tabby_core_1.Too
         }
         // 防御分支：Tabby 常规路径都会包装分屏，仅当拿到裸的顶层标签时在此包装
         const split = this.tabsService.create({ type: tabby_core_1.SplitTabComponent });
-        const prevBusy = this.busy;
-        this.busy = true;
-        try {
-            this.app.removeTab(tab);
-            const pending = split.addTab(tab, null, 'l');
-            this.app.addTabRaw(split);
-            void pending.catch(err => console.error('[server-monitor] 包装分屏失败', err));
-        }
-        finally {
-            this.busy = prevBusy;
-        }
+        this.app.removeTab(tab);
+        const pending = split.addTab(tab, null, 'l');
+        this.app.addTabRaw(split);
+        void pending.then(() => this.blurInactiveTopTabs(), err => console.error('[server-monitor] 包装分屏失败', err));
         return split;
     }
     /** 当前活动的 SSH 标签页（含分屏内的子标签）；找不到时退回第一个 SSH 标签 */
@@ -321,17 +372,6 @@ let MonitorButtonProvider = class MonitorButtonProvider extends tabby_core_1.Too
         const profile = tab === null || tab === void 0 ? void 0 : tab.profile;
         return !!((_a = profile === null || profile === void 0 ? void 0 : profile.options) === null || _a === void 0 ? void 0 : _a.host)
             && ((profile === null || profile === void 0 ? void 0 : profile.type) === 'ssh' || (!!tab && 'sshSession' in tab));
-    }
-    /** 在给定标签（或其所在的分屏中）找带 SSH 配置的标签（不要求会话已连接，用于即时换绑/自动打开） */
-    findSSHProfileTabIn(tab) {
-        var _a;
-        if (this.isSshProfileTab(tab)) {
-            return tab;
-        }
-        if (tab instanceof tabby_core_1.SplitTabComponent) {
-            return (_a = tab.getAllTabs().find((t) => this.isSshProfileTab(t))) !== null && _a !== void 0 ? _a : null;
-        }
-        return null;
     }
     isSSHTab(tab) {
         var _a, _b;
@@ -1528,7 +1568,7 @@ let MonitorService = MonitorService_1 = class MonitorService {
     }
     /** 收集监控目标：本机 + 每台已连接 SSH 服务器（按主机去重） */
     collectTargets(cfg) {
-        var _a, _b, _c, _d, _e;
+        var _a, _b, _c, _d, _e, _f, _g, _h;
         const result = [];
         const seen = new Set();
         if (cfg.monitorLocal) {
@@ -1552,11 +1592,17 @@ let MonitorService = MonitorService_1 = class MonitorService {
                 }
                 const o = sshTab.profile.options;
                 const id = `ssh:${o.user || 'default'}@${o.host}:${(_d = o.port) !== null && _d !== void 0 ? _d : 22}`;
-                if (seen.has(id)) {
-                    continue; // 多个标签页复用同一会话时只保留一个
+                const existing = result.find(t => t.id === id);
+                if (existing) {
+                    // 同一服务器开多个窗口时共享一个目标（主机级数据只采集一份）；
+                    // 采集通道优先用已连接的会话，避免第一个窗口断开/连接中时正常窗口的面板报“SSH 会话未连接”
+                    if (!((_f = (_e = existing.ref) === null || _e === void 0 ? void 0 : _e.sshSession) === null || _f === void 0 ? void 0 : _f.open) && ((_g = sshTab.sshSession) === null || _g === void 0 ? void 0 : _g.open)) {
+                        existing.ref = sshTab;
+                    }
+                    continue;
                 }
                 seen.add(id);
-                result.push(this.merged(id, 'ssh', `${o.user ? o.user + '@' : ''}${o.host}:${(_e = o.port) !== null && _e !== void 0 ? _e : 22}`, sshTab));
+                result.push(this.merged(id, 'ssh', `${o.user ? o.user + '@' : ''}${o.host}:${(_h = o.port) !== null && _h !== void 0 ? _h : 22}`, sshTab));
             }
         }
         // 清理已关闭目标的状态与低频数据缓存

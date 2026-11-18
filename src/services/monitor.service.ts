@@ -133,8 +133,14 @@ export class MonitorService {
                 }
                 const o = sshTab.profile.options
                 const id = `ssh:${o.user || 'default'}@${o.host}:${o.port ?? 22}`
-                if (seen.has(id)) {
-                    continue // 多个标签页复用同一会话时只保留一个
+                const existing = result.find(t => t.id === id)
+                if (existing) {
+                    // 同一服务器开多个窗口时共享一个目标（主机级数据只采集一份）；
+                    // 采集通道优先用已连接的会话，避免第一个窗口断开/连接中时正常窗口的面板报“SSH 会话未连接”
+                    if (!existing.ref?.sshSession?.open && sshTab.sshSession?.open) {
+                        existing.ref = sshTab
+                    }
+                    continue
                 }
                 seen.add(id)
                 result.push(this.merged(id, 'ssh', `${o.user ? o.user + '@' : ''}${o.host}:${o.port ?? 22}`, sshTab))
