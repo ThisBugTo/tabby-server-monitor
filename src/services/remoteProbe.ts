@@ -112,6 +112,38 @@ export function buildRemoteAuxCommand (opts: ProbeExtra = {}): string {
     ].join('\n')
 }
 
+/**
+ * 无 shell 集成（终端不上报 OSC 1337 CurrentDir）时的 cwd 兜底探测命令（仅 Linux）：
+ * 在 exec 通道内向上找本 SSH 连接的 sshd 会话进程，再读取其子进程（交互 shell）的 /proc/<pid>/cwd。
+ * 只读、不碰交互终端；连接复用（reuseSession）时子进程含其他标签的 shell，由调用方禁用本探测。
+ */
+export function buildInteractiveCwdCommand (): string {
+    const shells = 'bash|zsh|sh|dash|ash|ksh|ksh93|mksh|busybox|fish|tcsh|csh|nu|xonsh|oil|oil-osh|pwsh|elvish'
+    return [
+        // $$ 必须在单引号外展开：拿到执行本命令的 shell 进程 pid
+        `c=$(ps -eo pid=,ppid=,tty=,comm= 2>/dev/null | awk -v me="$$" '`,
+        '{ pid[NR]=$1; ppid[NR]=$2; tty[NR]=$3; comm[NR]=$4 }',
+        'END {',
+        '  dad = "";',
+        '  for (i = 1; i <= NR; i++) if (pid[i] + 0 == me + 0) { dad = ppid[i]; break }',
+        '  if (dad == "") exit;',
+        '  for (i = 1; i <= NR; i++) if (pid[i] + 0 == dad + 0) { if (comm[i] !~ /^sshd/) dad = ""; break }',
+        '  if (dad == "") exit;',
+        `  for (i = 1; i <= NR; i++) if (ppid[i] + 0 == dad + 0 && pid[i] + 0 != me + 0 && tty[i] != "?" && tty[i] != "" && comm[i] ~ /^(${shells})$/) { print pid[i]; exit }`,
+        '}',
+        `')`,
+        `if [ -n "$c" ]; then readlink /proc/$c/cwd 2>/dev/null; fi`,
+        `echo '${M_END}'`,
+    ].join('\n')
+}
+
+/** 探测本连接交互 shell 的当前目录（无 shell 集成时的兜底；失败/不支持返回 null） */
+export async function probeInteractiveCwd (sshSession: SSHTabSession): Promise<string|null> {
+    const out = await execRemoteCommand(sshSession, buildInteractiveCwdCommand(), 6000)
+    const lines = out.split('\n').map(s => s.trim()).filter(s => s.startsWith('/'))
+    return lines.length ? lines[lines.length - 1] : null
+}
+
 function withTimeout<T> (promise: Promise<T>, timeoutMs: number, message: string): Promise<T> {
     return new Promise<T>((resolve, reject) => {
         const timer = setTimeout(() => reject(new Error(message)), timeoutMs)

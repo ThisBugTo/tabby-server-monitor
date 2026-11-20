@@ -9,6 +9,10 @@ export class MonitorConfigProvider extends ConfigProvider {
             monitorLocal: false,
             /** 是否自动监控已打开的 SSH 标签页 */
             monitorSSHTabs: true,
+            /** 是否默认打开底部文件传输面板（与监控面板同一按钮一起开合） */
+            filePaneAutoOpen: true,
+            /** 文件列表与目录树是否显示以 . 开头的隐藏文件 */
+            showHiddenFiles: true,
             /** 刷新间隔（秒），最小 2 */
             refreshInterval: 5,
             /** CPU 采样窗口（秒），同时用于远端命令内 sleep 与本地两次采样间隔 */

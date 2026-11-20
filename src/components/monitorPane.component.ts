@@ -1,5 +1,6 @@
 import { Component, EventEmitter, HostBinding, Injector, Input, Output } from '@angular/core'
 import { BaseTabComponent, ThemesService } from 'tabby-core'
+import { interval } from 'rxjs'
 import { MonitorTarget } from '../interfaces'
 import { MonitorService } from '../services/monitor.service'
 import { isLightTheme } from '../theme'
@@ -17,8 +18,9 @@ import { MONITOR_ICON_SVG } from '../icons'
             <div class="sm-head">
                 <strong class="sm-title">服务器监控</strong>
                 <span class="sm-host" *ngIf="target">{{ target.label }}</span>
-                <span class="sm-muted" *ngIf="monitor.lastRefresh">
-                    {{ monitor.lastRefresh | date: 'HH:mm:ss' }}
+                <span class="sm-muted" *ngIf="monitor.lastRefresh"
+                      [title]="'上次刷新 ' + (monitor.lastRefresh | date: 'HH:mm:ss')">
+                    {{ now | date: 'HH:mm:ss' }}
                 </span>
                 <button class="btn btn-sm btn-secondary" (click)='refreshNow()'>刷新</button>
                 <button class="btn btn-sm btn-secondary" (click)='close.emit()'>✕</button>
@@ -89,6 +91,8 @@ export class MonitorPaneComponent extends BaseTabComponent {
     @Output() close = new EventEmitter<void>()
 
     target: MonitorTarget|null = null
+    /** 当前时间（每秒刷新，不受监控刷新间隔影响；上次刷新时间见 tooltip） */
+    now = new Date()
     private _targetId = ''
     private allTargets: MonitorTarget[] = []
 
@@ -104,6 +108,8 @@ export class MonitorPaneComponent extends BaseTabComponent {
         const updateTheme = (): void => { this.isLight = isLightTheme(this.themes) }
         updateTheme()
         this.subscribeUntilDestroyed(this.themes.themeChanged$, updateTheme)
+        // 时间实时跳动：每秒更新，不随刷新间隔停顿
+        this.subscribeUntilDestroyed(interval(1000), () => { this.now = new Date() })
         this.setTitle('服务器监控')
         this.icon = MONITOR_ICON_SVG
         this.subscribeUntilDestroyed(monitor.targets$, targets => {

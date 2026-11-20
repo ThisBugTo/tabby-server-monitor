@@ -64,6 +64,20 @@ import { ConfigService } from 'tabby-core'
             ></checkbox>
         </div>
 
+        <h4>文件传输</h4>
+        <div class="sm-section">
+            <checkbox
+                text='默认打开文件传输面板（与监控面板同一按钮一起开合）'
+                [(ngModel)]='config.store.serverMonitor.filePaneAutoOpen'
+                (ngModelChange)='config.save()'
+            ></checkbox>
+            <checkbox
+                text='显示隐藏文件（以 . 开头，文件列表与目录树）'
+                [(ngModel)]='config.store.serverMonitor.showHiddenFiles'
+                (ngModelChange)='config.save()'
+            ></checkbox>
+        </div>
+
         <div class="sm-section form-inline">
             <label>占用条颜色</label>
             <select class='form-control form-control-sm sm-select'
@@ -167,6 +181,12 @@ export class MonitorSettingsComponent {
             }
             if (!s.barColorCustom) {
                 s.barColorCustom = '#81c784'
+            }
+            if (s.filePaneAutoOpen === undefined) {
+                s.filePaneAutoOpen = true
+            }
+            if (s.showHiddenFiles === undefined) {
+                s.showHiddenFiles = true
             }
         }
     }

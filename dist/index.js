@@ -41,16 +41,16 @@ let MonitorButtonProvider = class MonitorButtonProvider extends tabby_core_1.Too
         this.notifications = notifications;
         /** 每个 SSH 标签页固定持有的监控面板（一窗一面板，不跨窗口移动） */
         this.panes = new Map();
-        /** 每个 SSH 标签页的底部文件传输面板（手动开关，不自动弹出） */
+        /** 每个 SSH 标签页的底部文件传输面板（随监控面板一起开合，默认随标签自动打开） */
         this.filePanes = new Map();
         /** 已挂载 tabAdded 监听的分屏（避免重复订阅） */
         this.watchedSplits = new WeakSet();
         hotkeys.hotkey$.subscribe(hotkey => {
             if (hotkey === 'open-server-monitor') {
-                void this.open();
+                this.toggleForActive(false);
             }
             else if (hotkey === 'open-file-transfer') {
-                this.toggleFilePaneForActive();
+                this.toggleForActive(true);
             }
         });
         // 切换标签页时只修复分屏布局并补挂分屏监听；面板按 SSH 标签固定绑定，不跟随活动窗口移动
@@ -68,7 +68,7 @@ let MonitorButtonProvider = class MonitorButtonProvider extends tabby_core_1.Too
                 this.repairSplitRatios(active);
             }
         });
-        // 新开（含重启恢复）的 SSH 标签就绪后，立即在其左侧打开专属监控面板
+        // 新开（含重启恢复）的 SSH 标签就绪后，立即在其左侧打开专属监控面板（默认同时打开底部文件传输面板）
         this.app.tabOpened$.subscribe(tab => this.autoOpenFor(tab));
         // 插件构造晚于标签恢复时，补扫已打开的标签
         for (const tab of [...this.app.tabs]) {
@@ -78,42 +78,34 @@ let MonitorButtonProvider = class MonitorButtonProvider extends tabby_core_1.Too
     provide() {
         return [{
                 icon: icons_1.MONITOR_ICON_SVG,
-                title: '服务器状态监控',
+                title: '服务器状态监控（含文件传输面板）',
                 touchBarTitle: 'Monitor',
                 weight: 5,
-                click: () => { void this.open(); },
-            }, {
-                icon: icons_1.FOLDER_ICON_SVG,
-                title: '文件传输（SSH 文件上传/下载）',
-                touchBarTitle: 'Files',
-                weight: 6,
-                click: () => this.toggleFilePaneForActive(),
+                click: () => this.toggleForActive(false),
             }];
     }
-    async open() {
+    /** 工具栏按钮 / 快捷键入口：一个按钮同时开合监控面板与文件传输面板 */
+    toggleForActive(fileHotkey) {
         const sshTab = this.findActiveSSHTab();
         if (!sshTab) {
-            // 没有 SSH 会话时退回为独立标签页
-            this.openStandaloneTab();
+            if (fileHotkey) {
+                this.notifications.error('文件传输需要 SSH 连接', '请先打开一个 SSH 标签页');
+            }
+            else {
+                this.openStandaloneTab();
+            }
             return;
         }
-        await this.togglePane(sshTab);
+        void this.toggleBoth(sshTab);
     }
-    /** 文件传输面板开关（工具栏按钮 / 快捷键）；无 SSH 会话时提示而不是静默失败 */
-    toggleFilePaneForActive() {
-        const sshTab = this.findActiveSSHTab();
-        if (!sshTab) {
-            this.notifications.error('文件传输需要 SSH 连接', '请先打开一个 SSH 标签页');
-            return;
-        }
-        void this.toggleFilePane(sshTab);
-    }
-    /** 开关指定 SSH 会话自己的底部文件传输面板 */
-    async toggleFilePane(sshTab) {
+    /** 开关指定 SSH 会话的监控面板与底部文件传输面板（一起展示、一起关闭） */
+    async toggleBoth(sshTab) {
         var _a;
-        const existing = this.filePanes.get(sshTab);
+        const existing = this.panes.get(sshTab);
         if (existing) {
+            // 再次点击：监控关闭时文件传输一并收起
             this.closePane(existing);
+            this.closeFilePane(sshTab);
             return;
         }
         // 打开：先切到目标标签，保证面板可见
@@ -121,7 +113,23 @@ let MonitorButtonProvider = class MonitorButtonProvider extends tabby_core_1.Too
         if (top !== this.app.activeTab) {
             this.app.selectTab(top);
         }
-        await this.openFilePaneFor(sshTab);
+        await this.openPanesFor(sshTab);
+    }
+    /** 打开指定会话的监控面板与（按设置默认开启的）文件传输面板；各自幂等去重 */
+    async openPanesFor(sshTab) {
+        if (!this.panes.has(sshTab)) {
+            await this.openPaneFor(sshTab);
+        }
+        if (this.monitor.settings.filePaneAutoOpen !== false && !this.filePanes.has(sshTab)) {
+            await this.openFilePaneFor(sshTab);
+        }
+    }
+    /** 关闭指定会话的文件传输面板（不存在时静默跳过） */
+    closeFilePane(sshTab) {
+        const pane = this.filePanes.get(sshTab);
+        if (pane) {
+            this.closePane(pane);
+        }
     }
     /** 在 SSH 标签**下方**创建文件传输面板（FinalShell 底部文件面板风格，可拖中线调高矮） */
     async openFilePaneFor(sshTab) {
@@ -183,7 +191,7 @@ let MonitorButtonProvider = class MonitorButtonProvider extends tabby_core_1.Too
             }
             for (const sshTab of this.sshTabsIn(tab)) {
                 if (!this.panes.has(sshTab)) {
-                    void this.openPaneFor(sshTab);
+                    void this.openPanesFor(sshTab);
                 }
             }
         };
@@ -221,33 +229,17 @@ let MonitorButtonProvider = class MonitorButtonProvider extends tabby_core_1.Too
         split.tabAdded$.pipe((0, operators_1.takeUntil)(split.destroyed$)).subscribe(tab => {
             const settings = this.monitor.settings;
             if (settings.enabled && settings.monitorSSHTabs && this.isSshProfileTab(tab) && !this.panes.has(tab)) {
-                void this.openPaneFor(tab);
+                void this.openPanesFor(tab);
             }
         });
         const settings = this.monitor.settings;
         if (settings.enabled && settings.monitorSSHTabs) {
             for (const sshTab of this.sshTabsIn(split)) {
                 if (!this.panes.has(sshTab)) {
-                    void this.openPaneFor(sshTab);
+                    void this.openPanesFor(sshTab);
                 }
             }
         }
-    }
-    /** 开关指定 SSH 会话自己的监控面板（每个窗口只关联自己的面板） */
-    async togglePane(sshTab) {
-        var _a;
-        const existing = this.panes.get(sshTab);
-        if (existing) {
-            // 该会话已有面板：再次点击关闭
-            this.closePane(existing);
-            return;
-        }
-        // 打开：先切到目标分屏，保证面板可见
-        const top = (_a = sshTab.topmostParent) !== null && _a !== void 0 ? _a : sshTab;
-        if (top !== this.app.activeTab) {
-            this.app.selectTab(top);
-        }
-        await this.openPaneFor(sshTab);
     }
     /** 在指定 SSH 会话左侧创建该会话专属的监控面板（一窗一面板，不跨窗口移动） */
     async openPaneFor(sshTab) {
@@ -263,7 +255,11 @@ let MonitorButtonProvider = class MonitorButtonProvider extends tabby_core_1.Too
                 this.panes.delete(sshTab); // 面板所在分屏被整体关闭时同步清理
             }
         });
-        pane.close.subscribe(() => this.closePane(pane));
+        pane.close.subscribe(() => {
+            // 监控面板关闭（含 ✕ 按钮）时，文件传输面板一并收起
+            this.closePane(pane);
+            this.closeFilePane(sshTab);
+        });
         // SSH 标签被单独关闭时延迟收掉它的孤儿面板（整窗关闭时面板已随分屏销毁，此时查不到即跳过）
         sshTab.destroyed$.pipe((0, operators_1.take)(1)).subscribe(() => {
             setImmediate(() => {
@@ -520,7 +516,7 @@ var __decorate = (this && this.__decorate) || function (decorators, target, key,
 var __metadata = (this && this.__metadata) || function (k, v) {
     if (typeof Reflect === "object" && typeof Reflect.metadata === "function") return Reflect.metadata(k, v);
 };
-var _a, _b, _c, _d, _e, _f, _g;
+var _a, _b, _c, _d, _e, _f, _g, _h;
 Object.defineProperty(exports, "__esModule", ({ value: true }));
 exports.FilePaneComponent = void 0;
 const core_1 = __webpack_require__(/*! @angular/core */ "@angular/core");
@@ -569,9 +565,10 @@ let FilePaneComponent = class FilePaneComponent extends tabby_core_1.BaseTabComp
     get tab() {
         return this._tab;
     }
-    constructor(injector, platform, notifications, themes) {
+    constructor(injector, platform, config, notifications, themes) {
         super(injector);
         this.platform = platform;
+        this.config = config;
         this.notifications = notifications;
         this.themes = themes;
         this.close = new core_1.EventEmitter();
@@ -596,11 +593,17 @@ let FilePaneComponent = class FilePaneComponent extends tabby_core_1.BaseTabComp
         this.connecting = false;
         this.pathLoaded = false;
         this.navSeq = 0;
+        /** 终端最近一次检测到的工作目录：仅在其变化时跟随，不干扰面板内手动浏览 */
+        this.lastCwd = null;
+        this.cwdProbeAt = 0;
+        this.cwdProbing = false;
         this.setTitle('文件传输');
         this.icon = icons_1.FOLDER_ICON_SVG;
         const updateTheme = () => { this.isLight = (0, theme_1.isLightTheme)(this.themes); };
         updateTheme();
         this.subscribeUntilDestroyed(this.themes.themeChanged$, updateTheme);
+        // 与 SSH 终端保持同路径：每秒检测一次终端 cwd，仅在其变化时跳转（cd 后自动切换）
+        this.subscribeUntilDestroyed((0, rxjs_1.interval)(1000), () => void this.syncTerminalCwd());
         // SFTP 未就绪（连接中 / 断开重连）时每 2 秒静默重试，就绪后自动加载目录
         this.subscribeUntilDestroyed((0, rxjs_1.interval)(2000), () => {
             if (this._tab && !this.sftp && !this.connecting && !this.busy) {
@@ -675,21 +678,18 @@ let FilePaneComponent = class FilePaneComponent extends tabby_core_1.BaseTabComp
             this.connecting = false;
         }
     }
-    /** 初始路径：shell 集成上报的 cwd → exec pwd → '/' */
+    /** 初始路径：shell 集成上报的 cwd → 交互 shell cwd 探测 → exec pwd → '/' */
     async detectInitialPath() {
-        var _a, _b, _c, _d, _e;
-        try {
-            const cwd = await ((_c = (_b = (_a = this._tab) === null || _a === void 0 ? void 0 : _a.session) === null || _b === void 0 ? void 0 : _b.getWorkingDirectory) === null || _c === void 0 ? void 0 : _c.call(_b));
-            if (cwd === null || cwd === void 0 ? void 0 : cwd.startsWith('/')) {
-                return cwd;
-            }
+        var _a, _b;
+        const detected = await this.detectCwd(this._tab, true);
+        if (detected) {
+            return detected;
         }
-        catch { /* 无 shell 集成时返回 null，继续回退 */ }
-        const session = (_d = this._tab) === null || _d === void 0 ? void 0 : _d.sshSession;
+        const session = (_a = this._tab) === null || _a === void 0 ? void 0 : _a.sshSession;
         if (session === null || session === void 0 ? void 0 : session.open) {
             try {
                 const out = await (0, remoteProbe_1.execRemoteCommand)(session, 'pwd -P', 6000);
-                const line = (_e = out.trim().split('\n').pop()) !== null && _e !== void 0 ? _e : '';
+                const line = (_b = out.trim().split('\n').pop()) !== null && _b !== void 0 ? _b : '';
                 if (line.startsWith('/')) {
                     return line;
                 }
@@ -697,6 +697,57 @@ let FilePaneComponent = class FilePaneComponent extends tabby_core_1.BaseTabComp
             catch { /* exec 不可用时回退根目录 */ }
         }
         return '/';
+    }
+    /**
+     * 终端当前工作目录：优先 shell 集成上报（零成本）；无上报且 allowProbe 时，
+     * exec 探测本连接交互 shell 的 cwd（2 秒节流 + 防重入；连接复用时子进程含其他标签，禁用）。
+     */
+    async detectCwd(tab, allowProbe) {
+        var _a, _b, _c, _d, _e;
+        if (!tab) {
+            return null;
+        }
+        try {
+            const reported = await ((_b = (_a = tab.session) === null || _a === void 0 ? void 0 : _a.getWorkingDirectory) === null || _b === void 0 ? void 0 : _b.call(_a));
+            if (reported === null || reported === void 0 ? void 0 : reported.startsWith('/')) {
+                return reported;
+            }
+        }
+        catch { /* 无 shell 集成时返回 null，继续兜底 */ }
+        if (!allowProbe || !((_c = tab.sshSession) === null || _c === void 0 ? void 0 : _c.open) || ((_e = (_d = tab.profile) === null || _d === void 0 ? void 0 : _d.options) === null || _e === void 0 ? void 0 : _e.reuseSession)) {
+            return null;
+        }
+        const now = Date.now();
+        if (this.cwdProbing || now - this.cwdProbeAt < 2000) {
+            return null;
+        }
+        this.cwdProbing = true;
+        this.cwdProbeAt = now;
+        try {
+            return await (0, remoteProbe_1.probeInteractiveCwd)(tab.sshSession);
+        }
+        catch {
+            return null;
+        }
+        finally {
+            this.cwdProbing = false;
+        }
+    }
+    /** 跟随终端当前工作目录：终端 cd 后自动切换；cwd 未变时不动作（面板内手动浏览不受影响） */
+    async syncTerminalCwd() {
+        var _a;
+        const tab = this._tab;
+        if (!((_a = tab === null || tab === void 0 ? void 0 : tab.sshSession) === null || _a === void 0 ? void 0 : _a.open) || !this.sftp || this.busy || this.connecting || this.loading || !this.pathLoaded) {
+            return;
+        }
+        const cwd = await this.detectCwd(tab, true);
+        if (!cwd || cwd === this.lastCwd) {
+            return;
+        }
+        this.lastCwd = cwd;
+        if (cwd !== this.path) {
+            await this.navigate(cwd);
+        }
     }
     /* ---------- 目录浏览 ---------- */
     /** 跳转到指定目录；返回是否成功 */
@@ -853,16 +904,36 @@ let FilePaneComponent = class FilePaneComponent extends tabby_core_1.BaseTabComp
             void this.navigate(node.path);
         }
     }
-    /** 展开的目录树扁平视图（供模板 *ngFor 使用；每项均为现算对象，避免递归模板上下文问题） */
+    /** 是否显示隐藏文件（设置 → 服务器监控 → 文件传输；面板内可快捷切换） */
+    get showHidden() {
+        var _a;
+        return ((_a = this.config.store.serverMonitor) === null || _a === void 0 ? void 0 : _a.showHiddenFiles) !== false;
+    }
+    set showHidden(value) {
+        const s = this.config.store.serverMonitor;
+        if (s) {
+            s.showHiddenFiles = value;
+            this.config.save();
+        }
+    }
+    /** 当前展示的文件（按“显示隐藏文件”设置过滤，列表与计数共用） */
+    get visibleFiles() {
+        return this.showHidden ? this.files : this.files.filter(f => { var _a; return !((_a = f === null || f === void 0 ? void 0 : f.name) === null || _a === void 0 ? void 0 : _a.startsWith('.')); });
+    }
+    /** 展示的目录树扁平视图（供模板 *ngFor 使用；每项均为现算对象，避免递归模板上下文问题） */
     get visibleNodes() {
         const out = [];
         const walk = (node, level) => {
+            var _a;
             if (!node) {
                 return;
             }
             out.push({ node, level });
             if (node.expanded && node.children) {
                 for (const child of node.children) {
+                    if (!this.showHidden && ((_a = child === null || child === void 0 ? void 0 : child.name) === null || _a === void 0 ? void 0 : _a.startsWith('.'))) {
+                        continue; // 隐藏目录不进树（当前目录仍可通过路径输入框进入）
+                    }
                     walk(child, level + 1);
                 }
             }
@@ -1167,8 +1238,9 @@ let FilePaneComponent = class FilePaneComponent extends tabby_core_1.BaseTabComp
         }
         return this.sortAsc ? ' ↑' : ' ↓';
     }
-    /** 目录恒在前，其余按当前排序键排列 */
+    /** 目录恒在前，其余按当前排序键排列（已按“显示隐藏文件”过滤） */
     get sortedFiles() {
+        const files = this.visibleFiles;
         const cmp = (a, b) => {
             let d = 0;
             if (this.sortKey === 'size') {
@@ -1182,8 +1254,8 @@ let FilePaneComponent = class FilePaneComponent extends tabby_core_1.BaseTabComp
             }
             return this.sortAsc ? d : -d;
         };
-        const dirs = this.files.filter(f => f.isDirectory).sort(cmp);
-        const rest = this.files.filter(f => !f.isDirectory).sort(cmp);
+        const dirs = files.filter(f => f.isDirectory).sort(cmp);
+        const rest = files.filter(f => !f.isDirectory).sort(cmp);
         return [...dirs, ...rest];
     }
     trackFile(index, file) {
@@ -1261,8 +1333,8 @@ let FilePaneComponent = class FilePaneComponent extends tabby_core_1.BaseTabComp
 };
 __decorate([
     (0, core_1.Input)(),
-    __metadata("design:type", typeof (_e = typeof interfaces_1.SSHTabLike !== "undefined" && interfaces_1.SSHTabLike) === "function" ? _e : Object),
-    __metadata("design:paramtypes", [typeof (_f = typeof interfaces_1.SSHTabLike !== "undefined" && interfaces_1.SSHTabLike) === "function" ? _f : Object])
+    __metadata("design:type", typeof (_f = typeof interfaces_1.SSHTabLike !== "undefined" && interfaces_1.SSHTabLike) === "function" ? _f : Object),
+    __metadata("design:paramtypes", [typeof (_g = typeof interfaces_1.SSHTabLike !== "undefined" && interfaces_1.SSHTabLike) === "function" ? _g : Object])
 ], FilePaneComponent.prototype, "tab", null);
 __decorate([
     (0, core_1.Output)(),
@@ -1270,7 +1342,7 @@ __decorate([
 ], FilePaneComponent.prototype, "close", void 0);
 __decorate([
     (0, core_1.ViewChild)('newFolderInput'),
-    __metadata("design:type", typeof (_g = typeof core_1.ElementRef !== "undefined" && core_1.ElementRef) === "function" ? _g : Object)
+    __metadata("design:type", typeof (_h = typeof core_1.ElementRef !== "undefined" && core_1.ElementRef) === "function" ? _h : Object)
 ], FilePaneComponent.prototype, "newFolderInput", void 0);
 FilePaneComponent = __decorate([
     (0, core_1.Component)({
@@ -1302,6 +1374,9 @@ FilePaneComponent = __decorate([
                 <button class="btn btn-sm btn-primary" (click)='downloadSelected()' [disabled]='busy || !sftp || !selected'>下载</button>
                 <button class="btn btn-sm btn-secondary" (click)='startCreateFolder()' [disabled]='busy || !sftp'>新建文件夹</button>
                 <button class="btn btn-sm btn-secondary" (click)='deleteSelected()' [disabled]='busy || !sftp || !selected'>删除</button>
+                <label class="fp-check" title='是否显示以 . 开头的隐藏文件（设置 → 服务器监控 → 文件传输）'>
+                    <input type='checkbox' [(ngModel)]='showHidden'> 隐藏文件
+                </label>
                 <span class="fp-spacer"></span>
                 <span class="fp-muted fp-hint" *ngIf='selected' [title]='selected.name'>{{ selected.name }}</span>
             </div>
@@ -1360,7 +1435,7 @@ FilePaneComponent = __decorate([
 
             <div class="fp-foot">
                 <span class="fp-path-label" [title]='path'>{{ path }}</span>
-                <span class="fp-muted">{{ files.length }} 项</span>
+                <span class="fp-muted">{{ visibleFiles.length }} 项</span>
                 <span class="fp-muted" *ngIf='selected'>选中：{{ selected.name }}</span>
             </div>
         </div>
@@ -1405,6 +1480,12 @@ FilePaneComponent = __decorate([
         .fp-newfolder { padding-bottom: 2px; }
         .fp-input { flex: 1; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; }
         .fp-hint { max-width: 40%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        .fp-check {
+            display: flex; align-items: center; gap: 4px; margin: 0;
+            font-size: 11px; opacity: .8; user-select: none; white-space: nowrap;
+            cursor: pointer;
+        }
+        .fp-check input { margin: 0; }
         .fp-body {
             display: flex; flex: 1; min-height: 0;
             margin-top: 6px;
@@ -1469,7 +1550,7 @@ FilePaneComponent = __decorate([
         .fp-panel.fp-light .fp-error { color: #c62828; }
     `],
     }),
-    __metadata("design:paramtypes", [typeof (_a = typeof core_1.Injector !== "undefined" && core_1.Injector) === "function" ? _a : Object, typeof (_b = typeof tabby_core_1.PlatformService !== "undefined" && tabby_core_1.PlatformService) === "function" ? _b : Object, typeof (_c = typeof tabby_core_1.NotificationsService !== "undefined" && tabby_core_1.NotificationsService) === "function" ? _c : Object, typeof (_d = typeof tabby_core_1.ThemesService !== "undefined" && tabby_core_1.ThemesService) === "function" ? _d : Object])
+    __metadata("design:paramtypes", [typeof (_a = typeof core_1.Injector !== "undefined" && core_1.Injector) === "function" ? _a : Object, typeof (_b = typeof tabby_core_1.PlatformService !== "undefined" && tabby_core_1.PlatformService) === "function" ? _b : Object, typeof (_c = typeof tabby_core_1.ConfigService !== "undefined" && tabby_core_1.ConfigService) === "function" ? _c : Object, typeof (_d = typeof tabby_core_1.NotificationsService !== "undefined" && tabby_core_1.NotificationsService) === "function" ? _d : Object, typeof (_e = typeof tabby_core_1.ThemesService !== "undefined" && tabby_core_1.ThemesService) === "function" ? _e : Object])
 ], FilePaneComponent);
 exports.FilePaneComponent = FilePaneComponent;
 
@@ -1825,6 +1906,7 @@ Object.defineProperty(exports, "__esModule", ({ value: true }));
 exports.MonitorPaneComponent = void 0;
 const core_1 = __webpack_require__(/*! @angular/core */ "@angular/core");
 const tabby_core_1 = __webpack_require__(/*! tabby-core */ "tabby-core");
+const rxjs_1 = __webpack_require__(/*! rxjs */ "rxjs");
 const monitor_service_1 = __webpack_require__(/*! ../services/monitor.service */ "./src/services/monitor.service.ts");
 const theme_1 = __webpack_require__(/*! ../theme */ "./src/theme.ts");
 const icons_1 = __webpack_require__(/*! ../icons */ "./src/icons.ts");
@@ -1851,6 +1933,8 @@ let MonitorPaneComponent = class MonitorPaneComponent extends tabby_core_1.BaseT
         this.themes = themes;
         this.close = new core_1.EventEmitter();
         this.target = null;
+        /** 当前时间（每秒刷新，不受监控刷新间隔影响；上次刷新时间见 tooltip） */
+        this.now = new Date();
         this._targetId = '';
         this.allTargets = [];
         /** 是否亮色主题（跟随 Tabby 亮/暗色切换） */
@@ -1858,6 +1942,8 @@ let MonitorPaneComponent = class MonitorPaneComponent extends tabby_core_1.BaseT
         const updateTheme = () => { this.isLight = (0, theme_1.isLightTheme)(this.themes); };
         updateTheme();
         this.subscribeUntilDestroyed(this.themes.themeChanged$, updateTheme);
+        // 时间实时跳动：每秒更新，不随刷新间隔停顿
+        this.subscribeUntilDestroyed((0, rxjs_1.interval)(1000), () => { this.now = new Date(); });
         this.setTitle('服务器监控');
         this.icon = icons_1.MONITOR_ICON_SVG;
         this.subscribeUntilDestroyed(monitor.targets$, targets => {
@@ -1894,8 +1980,9 @@ MonitorPaneComponent = __decorate([
             <div class="sm-head">
                 <strong class="sm-title">服务器监控</strong>
                 <span class="sm-host" *ngIf="target">{{ target.label }}</span>
-                <span class="sm-muted" *ngIf="monitor.lastRefresh">
-                    {{ monitor.lastRefresh | date: 'HH:mm:ss' }}
+                <span class="sm-muted" *ngIf="monitor.lastRefresh"
+                      [title]="'上次刷新 ' + (monitor.lastRefresh | date: 'HH:mm:ss')">
+                    {{ now | date: 'HH:mm:ss' }}
                 </span>
                 <button class="btn btn-sm btn-secondary" (click)='refreshNow()'>刷新</button>
                 <button class="btn btn-sm btn-secondary" (click)='close.emit()'>✕</button>
@@ -2004,6 +2091,12 @@ let MonitorSettingsComponent = class MonitorSettingsComponent {
             if (!s.barColorCustom) {
                 s.barColorCustom = '#81c784';
             }
+            if (s.filePaneAutoOpen === undefined) {
+                s.filePaneAutoOpen = true;
+            }
+            if (s.showHiddenFiles === undefined) {
+                s.showHiddenFiles = true;
+            }
         }
     }
 };
@@ -2066,6 +2159,20 @@ MonitorSettingsComponent = __decorate([
             <checkbox
                 text='显示运行时长与核数'
                 [(ngModel)]='config.store.serverMonitor.display.uptime'
+                (ngModelChange)='config.save()'
+            ></checkbox>
+        </div>
+
+        <h4>文件传输</h4>
+        <div class="sm-section">
+            <checkbox
+                text='默认打开文件传输面板（与监控面板同一按钮一起开合）'
+                [(ngModel)]='config.store.serverMonitor.filePaneAutoOpen'
+                (ngModelChange)='config.save()'
+            ></checkbox>
+            <checkbox
+                text='显示隐藏文件（以 . 开头，文件列表与目录树）'
+                [(ngModel)]='config.store.serverMonitor.showHiddenFiles'
                 (ngModelChange)='config.save()'
             ></checkbox>
         </div>
@@ -2177,6 +2284,7 @@ Object.defineProperty(exports, "__esModule", ({ value: true }));
 exports.MonitorTabComponent = void 0;
 const core_1 = __webpack_require__(/*! @angular/core */ "@angular/core");
 const tabby_core_1 = __webpack_require__(/*! tabby-core */ "tabby-core");
+const rxjs_1 = __webpack_require__(/*! rxjs */ "rxjs");
 const monitor_service_1 = __webpack_require__(/*! ../services/monitor.service */ "./src/services/monitor.service.ts");
 const icons_1 = __webpack_require__(/*! ../icons */ "./src/icons.ts");
 /** @hidden */
@@ -2185,8 +2293,11 @@ let MonitorTabComponent = class MonitorTabComponent extends tabby_core_1.BaseTab
         super(injector);
         this.monitor = monitor;
         this.config = config;
+        /** 当前时间（每秒刷新，不受监控刷新间隔影响；上次刷新时间见 tooltip） */
+        this.now = new Date();
         this.setTitle('服务器监控');
         this.icon = icons_1.MONITOR_ICON_SVG;
+        this.subscribeUntilDestroyed((0, rxjs_1.interval)(1000), () => { this.now = new Date(); });
     }
     get intervalSeconds() {
         var _a, _b;
@@ -2206,8 +2317,9 @@ MonitorTabComponent = __decorate([
         <div class="sm-wrap">
             <div class="sm-toolbar">
                 <strong>服务器状态监控</strong>
-                <span class="sm-muted" *ngIf="monitor.lastRefresh">
-                    最后刷新 {{ monitor.lastRefresh | date: 'HH:mm:ss' }}
+                <span class="sm-muted" *ngIf="monitor.lastRefresh"
+                      [title]="'上次刷新 ' + (monitor.lastRefresh | date: 'HH:mm:ss')">
+                    {{ now | date: 'HH:mm:ss' }}
                 </span>
                 <span class="sm-muted">每 {{ intervalSeconds }}s 刷新</span>
                 <button class="btn btn-sm btn-secondary" (click)='refreshNow()'>立即刷新</button>
@@ -2261,6 +2373,10 @@ class MonitorConfigProvider extends tabby_core_1.ConfigProvider {
                 monitorLocal: false,
                 /** 是否自动监控已打开的 SSH 标签页 */
                 monitorSSHTabs: true,
+                /** 是否默认打开底部文件传输面板（与监控面板同一按钮一起开合） */
+                filePaneAutoOpen: true,
+                /** 文件列表与目录树是否显示以 . 开头的隐藏文件 */
+                showHiddenFiles: true,
                 /** 刷新间隔（秒），最小 2 */
                 refreshInterval: 5,
                 /** CPU 采样窗口（秒），同时用于远端命令内 sleep 与本地两次采样间隔 */
@@ -3315,7 +3431,7 @@ exports.fetchLocalPublicIp = fetchLocalPublicIp;
 
 
 Object.defineProperty(exports, "__esModule", ({ value: true }));
-exports.probeSSHAux = exports.probeSSHCpu = exports.probeSSHQuick = exports.parseRemoteOutput = exports.execRemoteCommand = exports.buildRemoteAuxCommand = exports.buildRemoteCpuCommand = exports.buildRemoteQuickCommand = void 0;
+exports.probeSSHAux = exports.probeSSHCpu = exports.probeSSHQuick = exports.parseRemoteOutput = exports.execRemoteCommand = exports.probeInteractiveCwd = exports.buildInteractiveCwdCommand = exports.buildRemoteAuxCommand = exports.buildRemoteCpuCommand = exports.buildRemoteQuickCommand = void 0;
 const parse_1 = __webpack_require__(/*! ./parse */ "./src/services/parse.ts");
 const M_OS = '#SM#OS';
 const M_HOST = '#SM#HOST';
@@ -3421,6 +3537,38 @@ function buildRemoteAuxCommand(opts = {}) {
     ].join('\n');
 }
 exports.buildRemoteAuxCommand = buildRemoteAuxCommand;
+/**
+ * 无 shell 集成（终端不上报 OSC 1337 CurrentDir）时的 cwd 兜底探测命令（仅 Linux）：
+ * 在 exec 通道内向上找本 SSH 连接的 sshd 会话进程，再读取其子进程（交互 shell）的 /proc/<pid>/cwd。
+ * 只读、不碰交互终端；连接复用（reuseSession）时子进程含其他标签的 shell，由调用方禁用本探测。
+ */
+function buildInteractiveCwdCommand() {
+    const shells = 'bash|zsh|sh|dash|ash|ksh|ksh93|mksh|busybox|fish|tcsh|csh|nu|xonsh|oil|oil-osh|pwsh|elvish';
+    return [
+        // $$ 必须在单引号外展开：拿到执行本命令的 shell 进程 pid
+        `c=$(ps -eo pid=,ppid=,tty=,comm= 2>/dev/null | awk -v me="$$" '`,
+        '{ pid[NR]=$1; ppid[NR]=$2; tty[NR]=$3; comm[NR]=$4 }',
+        'END {',
+        '  dad = "";',
+        '  for (i = 1; i <= NR; i++) if (pid[i] + 0 == me + 0) { dad = ppid[i]; break }',
+        '  if (dad == "") exit;',
+        '  for (i = 1; i <= NR; i++) if (pid[i] + 0 == dad + 0) { if (comm[i] !~ /^sshd/) dad = ""; break }',
+        '  if (dad == "") exit;',
+        `  for (i = 1; i <= NR; i++) if (ppid[i] + 0 == dad + 0 && pid[i] + 0 != me + 0 && tty[i] != "?" && tty[i] != "" && comm[i] ~ /^(${shells})$/) { print pid[i]; exit }`,
+        '}',
+        `')`,
+        `if [ -n "$c" ]; then readlink /proc/$c/cwd 2>/dev/null; fi`,
+        `echo '${M_END}'`,
+    ].join('\n');
+}
+exports.buildInteractiveCwdCommand = buildInteractiveCwdCommand;
+/** 探测本连接交互 shell 的当前目录（无 shell 集成时的兜底；失败/不支持返回 null） */
+async function probeInteractiveCwd(sshSession) {
+    const out = await execRemoteCommand(sshSession, buildInteractiveCwdCommand(), 6000);
+    const lines = out.split('\n').map(s => s.trim()).filter(s => s.startsWith('/'));
+    return lines.length ? lines[lines.length - 1] : null;
+}
+exports.probeInteractiveCwd = probeInteractiveCwd;
 function withTimeout(promise, timeoutMs, message) {
     return new Promise((resolve, reject) => {
         const timer = setTimeout(() => reject(new Error(message)), timeoutMs);

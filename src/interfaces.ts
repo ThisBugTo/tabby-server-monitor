@@ -120,6 +120,8 @@ export interface SSHTabProfileOptions {
     host: string
     port?: number
     user?: string
+    /** 连接复用（多标签共享一条 SSH 连接）：exec 父进程不再专属本标签，禁用交互 shell cwd 兜底探测 */
+    reuseSession?: boolean
 }
 
 export interface SSHTabLike {

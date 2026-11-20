@@ -5,14 +5,14 @@ import { MonitorTabComponent } from './components/monitorTab.component'
 import { MonitorPaneComponent } from './components/monitorPane.component'
 import { FilePaneComponent } from './components/filePane.component'
 import { MonitorService } from './services/monitor.service'
-import { FOLDER_ICON_SVG, MONITOR_ICON_SVG } from './icons'
+import { MONITOR_ICON_SVG } from './icons'
 
 /** @hidden */
 @Injectable()
 export class MonitorButtonProvider extends ToolbarButtonProvider {
     /** 每个 SSH 标签页固定持有的监控面板（一窗一面板，不跨窗口移动） */
     private panes = new Map<any, MonitorPaneComponent>()
-    /** 每个 SSH 标签页的底部文件传输面板（手动开关，不自动弹出） */
+    /** 每个 SSH 标签页的底部文件传输面板（随监控面板一起开合，默认随标签自动打开） */
     private filePanes = new Map<any, FilePaneComponent>()
     /** 已挂载 tabAdded 监听的分屏（避免重复订阅） */
     private watchedSplits = new WeakSet<SplitTabComponent>()
@@ -28,9 +28,9 @@ export class MonitorButtonProvider extends ToolbarButtonProvider {
         super()
         hotkeys.hotkey$.subscribe(hotkey => {
             if (hotkey === 'open-server-monitor') {
-                void this.open()
+                this.toggleForActive(false)
             } else if (hotkey === 'open-file-transfer') {
-                this.toggleFilePaneForActive()
+                this.toggleForActive(true)
             }
         })
 
@@ -51,7 +51,7 @@ export class MonitorButtonProvider extends ToolbarButtonProvider {
             }
         })
 
-        // 新开（含重启恢复）的 SSH 标签就绪后，立即在其左侧打开专属监控面板
+        // 新开（含重启恢复）的 SSH 标签就绪后，立即在其左侧打开专属监控面板（默认同时打开底部文件传输面板）
         this.app.tabOpened$.subscribe(tab => this.autoOpenFor(tab))
 
         // 插件构造晚于标签恢复时，补扫已打开的标签
@@ -63,44 +63,34 @@ export class MonitorButtonProvider extends ToolbarButtonProvider {
     provide (): ToolbarButton[] {
         return [{
             icon: MONITOR_ICON_SVG,
-            title: '服务器状态监控',
+            title: '服务器状态监控（含文件传输面板）',
             touchBarTitle: 'Monitor',
             weight: 5, // >0 → 窗口右上工具栏，位于设置按钮旁
-            click: (): void => { void this.open() },
-        }, {
-            icon: FOLDER_ICON_SVG,
-            title: '文件传输（SSH 文件上传/下载）',
-            touchBarTitle: 'Files',
-            weight: 6, // 紧随监控按钮之后
-            click: (): void => this.toggleFilePaneForActive(),
+            click: (): void => this.toggleForActive(false),
         }]
     }
 
-    async open (): Promise<void> {
+    /** 工具栏按钮 / 快捷键入口：一个按钮同时开合监控面板与文件传输面板 */
+    private toggleForActive (fileHotkey: boolean): void {
         const sshTab = this.findActiveSSHTab()
         if (!sshTab) {
-            // 没有 SSH 会话时退回为独立标签页
-            this.openStandaloneTab()
+            if (fileHotkey) {
+                this.notifications.error('文件传输需要 SSH 连接', '请先打开一个 SSH 标签页')
+            } else {
+                this.openStandaloneTab()
+            }
             return
         }
-        await this.togglePane(sshTab)
+        void this.toggleBoth(sshTab)
     }
 
-    /** 文件传输面板开关（工具栏按钮 / 快捷键）；无 SSH 会话时提示而不是静默失败 */
-    private toggleFilePaneForActive (): void {
-        const sshTab = this.findActiveSSHTab()
-        if (!sshTab) {
-            this.notifications.error('文件传输需要 SSH 连接', '请先打开一个 SSH 标签页')
-            return
-        }
-        void this.toggleFilePane(sshTab)
-    }
-
-    /** 开关指定 SSH 会话自己的底部文件传输面板 */
-    private async toggleFilePane (sshTab: any): Promise<void> {
-        const existing = this.filePanes.get(sshTab)
+    /** 开关指定 SSH 会话的监控面板与底部文件传输面板（一起展示、一起关闭） */
+    private async toggleBoth (sshTab: any): Promise<void> {
+        const existing = this.panes.get(sshTab)
         if (existing) {
+            // 再次点击：监控关闭时文件传输一并收起
             this.closePane(existing)
+            this.closeFilePane(sshTab)
             return
         }
         // 打开：先切到目标标签，保证面板可见
@@ -108,7 +98,25 @@ export class MonitorButtonProvider extends ToolbarButtonProvider {
         if (top !== this.app.activeTab) {
             this.app.selectTab(top)
         }
-        await this.openFilePaneFor(sshTab)
+        await this.openPanesFor(sshTab)
+    }
+
+    /** 打开指定会话的监控面板与（按设置默认开启的）文件传输面板；各自幂等去重 */
+    private async openPanesFor (sshTab: any): Promise<void> {
+        if (!this.panes.has(sshTab)) {
+            await this.openPaneFor(sshTab)
+        }
+        if (this.monitor.settings.filePaneAutoOpen !== false && !this.filePanes.has(sshTab)) {
+            await this.openFilePaneFor(sshTab)
+        }
+    }
+
+    /** 关闭指定会话的文件传输面板（不存在时静默跳过） */
+    private closeFilePane (sshTab: any): void {
+        const pane = this.filePanes.get(sshTab)
+        if (pane) {
+            this.closePane(pane)
+        }
     }
 
     /** 在 SSH 标签**下方**创建文件传输面板（FinalShell 底部文件面板风格，可拖中线调高矮） */
@@ -171,7 +179,7 @@ export class MonitorButtonProvider extends ToolbarButtonProvider {
             }
             for (const sshTab of this.sshTabsIn(tab)) {
                 if (!this.panes.has(sshTab)) {
-                    void this.openPaneFor(sshTab)
+                    void this.openPanesFor(sshTab)
                 }
             }
         }
@@ -210,33 +218,17 @@ export class MonitorButtonProvider extends ToolbarButtonProvider {
         split.tabAdded$.pipe(takeUntil(split.destroyed$)).subscribe(tab => {
             const settings = this.monitor.settings
             if (settings.enabled && settings.monitorSSHTabs && this.isSshProfileTab(tab) && !this.panes.has(tab)) {
-                void this.openPaneFor(tab as any)
+                void this.openPanesFor(tab as any)
             }
         })
         const settings = this.monitor.settings
         if (settings.enabled && settings.monitorSSHTabs) {
             for (const sshTab of this.sshTabsIn(split)) {
                 if (!this.panes.has(sshTab)) {
-                    void this.openPaneFor(sshTab)
+                    void this.openPanesFor(sshTab)
                 }
             }
         }
-    }
-
-    /** 开关指定 SSH 会话自己的监控面板（每个窗口只关联自己的面板） */
-    private async togglePane (sshTab: any): Promise<void> {
-        const existing = this.panes.get(sshTab)
-        if (existing) {
-            // 该会话已有面板：再次点击关闭
-            this.closePane(existing)
-            return
-        }
-        // 打开：先切到目标分屏，保证面板可见
-        const top = sshTab.topmostParent ?? sshTab
-        if (top !== this.app.activeTab) {
-            this.app.selectTab(top)
-        }
-        await this.openPaneFor(sshTab)
     }
 
     /** 在指定 SSH 会话左侧创建该会话专属的监控面板（一窗一面板，不跨窗口移动） */
@@ -253,7 +245,11 @@ export class MonitorButtonProvider extends ToolbarButtonProvider {
                 this.panes.delete(sshTab) // 面板所在分屏被整体关闭时同步清理
             }
         })
-        pane.close.subscribe(() => this.closePane(pane))
+        pane.close.subscribe(() => {
+            // 监控面板关闭（含 ✕ 按钮）时，文件传输面板一并收起
+            this.closePane(pane)
+            this.closeFilePane(sshTab)
+        })
         // SSH 标签被单独关闭时延迟收掉它的孤儿面板（整窗关闭时面板已随分屏销毁，此时查不到即跳过）
         sshTab.destroyed$.pipe(take(1)).subscribe(() => {
             setImmediate(() => {

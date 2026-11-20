@@ -1,8 +1,8 @@
 import { Component, ElementRef, EventEmitter, Injector, Input, Output, ViewChild } from '@angular/core'
-import { BaseTabComponent, FileDownload, FileUpload, NotificationsService, PlatformService, ThemesService } from 'tabby-core'
+import { BaseTabComponent, ConfigService, FileDownload, FileUpload, NotificationsService, PlatformService, ThemesService } from 'tabby-core'
 import { interval } from 'rxjs'
 import { SFTPFileLike, SFTPSessionLike, SSHTabLike } from '../interfaces'
-import { execRemoteCommand } from '../services/remoteProbe'
+import { execRemoteCommand, probeInteractiveCwd } from '../services/remoteProbe'
 import { isLightTheme } from '../theme'
 import { FOLDER_ICON_SVG } from '../icons'
 
@@ -83,6 +83,9 @@ function joinPath (dir: string, name: string): string {
                 <button class="btn btn-sm btn-primary" (click)='downloadSelected()' [disabled]='busy || !sftp || !selected'>下载</button>
                 <button class="btn btn-sm btn-secondary" (click)='startCreateFolder()' [disabled]='busy || !sftp'>新建文件夹</button>
                 <button class="btn btn-sm btn-secondary" (click)='deleteSelected()' [disabled]='busy || !sftp || !selected'>删除</button>
+                <label class="fp-check" title='是否显示以 . 开头的隐藏文件（设置 → 服务器监控 → 文件传输）'>
+                    <input type='checkbox' [(ngModel)]='showHidden'> 隐藏文件
+                </label>
                 <span class="fp-spacer"></span>
                 <span class="fp-muted fp-hint" *ngIf='selected' [title]='selected.name'>{{ selected.name }}</span>
             </div>
@@ -141,7 +144,7 @@ function joinPath (dir: string, name: string): string {
 
             <div class="fp-foot">
                 <span class="fp-path-label" [title]='path'>{{ path }}</span>
-                <span class="fp-muted">{{ files.length }} 项</span>
+                <span class="fp-muted">{{ visibleFiles.length }} 项</span>
                 <span class="fp-muted" *ngIf='selected'>选中：{{ selected.name }}</span>
             </div>
         </div>
@@ -186,6 +189,12 @@ function joinPath (dir: string, name: string): string {
         .fp-newfolder { padding-bottom: 2px; }
         .fp-input { flex: 1; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; }
         .fp-hint { max-width: 40%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        .fp-check {
+            display: flex; align-items: center; gap: 4px; margin: 0;
+            font-size: 11px; opacity: .8; user-select: none; white-space: nowrap;
+            cursor: pointer;
+        }
+        .fp-check input { margin: 0; }
         .fp-body {
             display: flex; flex: 1; min-height: 0;
             margin-top: 6px;
@@ -293,10 +302,15 @@ export class FilePaneComponent extends BaseTabComponent {
     private connecting = false
     private pathLoaded = false
     private navSeq = 0
+    /** 终端最近一次检测到的工作目录：仅在其变化时跟随，不干扰面板内手动浏览 */
+    private lastCwd: string|null = null
+    private cwdProbeAt = 0
+    private cwdProbing = false
 
     constructor (
         injector: Injector,
         public platform: PlatformService,
+        public config: ConfigService,
         private notifications: NotificationsService,
         private themes: ThemesService,
     ) {
@@ -306,6 +320,8 @@ export class FilePaneComponent extends BaseTabComponent {
         const updateTheme = (): void => { this.isLight = isLightTheme(this.themes) }
         updateTheme()
         this.subscribeUntilDestroyed(this.themes.themeChanged$, updateTheme)
+        // 与 SSH 终端保持同路径：每秒检测一次终端 cwd，仅在其变化时跳转（cd 后自动切换）
+        this.subscribeUntilDestroyed(interval(1000), () => void this.syncTerminalCwd())
         // SFTP 未就绪（连接中 / 断开重连）时每 2 秒静默重试，就绪后自动加载目录
         this.subscribeUntilDestroyed(interval(2000), () => {
             if (this._tab && !this.sftp && !this.connecting && !this.busy) {
@@ -379,14 +395,12 @@ export class FilePaneComponent extends BaseTabComponent {
         }
     }
 
-    /** 初始路径：shell 集成上报的 cwd → exec pwd → '/' */
+    /** 初始路径：shell 集成上报的 cwd → 交互 shell cwd 探测 → exec pwd → '/' */
     private async detectInitialPath (): Promise<string> {
-        try {
-            const cwd = await this._tab?.session?.getWorkingDirectory?.()
-            if (cwd?.startsWith('/')) {
-                return cwd
-            }
-        } catch { /* 无 shell 集成时返回 null，继续回退 */ }
+        const detected = await this.detectCwd(this._tab, true)
+        if (detected) {
+            return detected
+        }
         const session = this._tab?.sshSession
         if (session?.open) {
             try {
@@ -398,6 +412,54 @@ export class FilePaneComponent extends BaseTabComponent {
             } catch { /* exec 不可用时回退根目录 */ }
         }
         return '/'
+    }
+
+    /**
+     * 终端当前工作目录：优先 shell 集成上报（零成本）；无上报且 allowProbe 时，
+     * exec 探测本连接交互 shell 的 cwd（2 秒节流 + 防重入；连接复用时子进程含其他标签，禁用）。
+     */
+    private async detectCwd (tab: SSHTabLike|null, allowProbe: boolean): Promise<string|null> {
+        if (!tab) {
+            return null
+        }
+        try {
+            const reported = await tab.session?.getWorkingDirectory?.()
+            if (reported?.startsWith('/')) {
+                return reported
+            }
+        } catch { /* 无 shell 集成时返回 null，继续兜底 */ }
+        if (!allowProbe || !tab.sshSession?.open || tab.profile?.options?.reuseSession) {
+            return null
+        }
+        const now = Date.now()
+        if (this.cwdProbing || now - this.cwdProbeAt < 2000) {
+            return null
+        }
+        this.cwdProbing = true
+        this.cwdProbeAt = now
+        try {
+            return await probeInteractiveCwd(tab.sshSession)
+        } catch {
+            return null
+        } finally {
+            this.cwdProbing = false
+        }
+    }
+
+    /** 跟随终端当前工作目录：终端 cd 后自动切换；cwd 未变时不动作（面板内手动浏览不受影响） */
+    private async syncTerminalCwd (): Promise<void> {
+        const tab = this._tab
+        if (!tab?.sshSession?.open || !this.sftp || this.busy || this.connecting || this.loading || !this.pathLoaded) {
+            return
+        }
+        const cwd = await this.detectCwd(tab, true)
+        if (!cwd || cwd === this.lastCwd) {
+            return
+        }
+        this.lastCwd = cwd
+        if (cwd !== this.path) {
+            await this.navigate(cwd)
+        }
     }
 
     /* ---------- 目录浏览 ---------- */
@@ -559,7 +621,25 @@ export class FilePaneComponent extends BaseTabComponent {
         }
     }
 
-    /** 展开的目录树扁平视图（供模板 *ngFor 使用；每项均为现算对象，避免递归模板上下文问题） */
+    /** 是否显示隐藏文件（设置 → 服务器监控 → 文件传输；面板内可快捷切换） */
+    get showHidden (): boolean {
+        return this.config.store.serverMonitor?.showHiddenFiles !== false
+    }
+
+    set showHidden (value: boolean) {
+        const s = this.config.store.serverMonitor
+        if (s) {
+            s.showHiddenFiles = value
+            this.config.save()
+        }
+    }
+
+    /** 当前展示的文件（按“显示隐藏文件”设置过滤，列表与计数共用） */
+    get visibleFiles (): SFTPFileLike[] {
+        return this.showHidden ? this.files : this.files.filter(f => !f?.name?.startsWith('.'))
+    }
+
+    /** 展示的目录树扁平视图（供模板 *ngFor 使用；每项均为现算对象，避免递归模板上下文问题） */
     get visibleNodes (): FlatNode[] {
         const out: FlatNode[] = []
         const walk = (node: TreeNode|null|undefined, level: number): void => {
@@ -569,6 +649,9 @@ export class FilePaneComponent extends BaseTabComponent {
             out.push({ node, level })
             if (node.expanded && node.children) {
                 for (const child of node.children) {
+                    if (!this.showHidden && child?.name?.startsWith('.')) {
+                        continue // 隐藏目录不进树（当前目录仍可通过路径输入框进入）
+                    }
                     walk(child, level + 1)
                 }
             }
@@ -870,8 +953,9 @@ export class FilePaneComponent extends BaseTabComponent {
         return this.sortAsc ? ' ↑' : ' ↓'
     }
 
-    /** 目录恒在前，其余按当前排序键排列 */
+    /** 目录恒在前，其余按当前排序键排列（已按“显示隐藏文件”过滤） */
     get sortedFiles (): SFTPFileLike[] {
+        const files = this.visibleFiles
         const cmp = (a: SFTPFileLike, b: SFTPFileLike): number => {
             let d = 0
             if (this.sortKey === 'size') {
@@ -883,8 +967,8 @@ export class FilePaneComponent extends BaseTabComponent {
             }
             return this.sortAsc ? d : -d
         }
-        const dirs = this.files.filter(f => f.isDirectory).sort(cmp)
-        const rest = this.files.filter(f => !f.isDirectory).sort(cmp)
+        const dirs = files.filter(f => f.isDirectory).sort(cmp)
+        const rest = files.filter(f => !f.isDirectory).sort(cmp)
         return [...dirs, ...rest]
     }
 

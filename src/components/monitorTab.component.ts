@@ -1,5 +1,6 @@
 import { Component, Injector } from '@angular/core'
 import { BaseTabComponent, ConfigService } from 'tabby-core'
+import { interval } from 'rxjs'
 import { MonitorTarget } from '../interfaces'
 import { MonitorService } from '../services/monitor.service'
 import { MONITOR_ICON_SVG } from '../icons'
@@ -11,8 +12,9 @@ import { MONITOR_ICON_SVG } from '../icons'
         <div class="sm-wrap">
             <div class="sm-toolbar">
                 <strong>服务器状态监控</strong>
-                <span class="sm-muted" *ngIf="monitor.lastRefresh">
-                    最后刷新 {{ monitor.lastRefresh | date: 'HH:mm:ss' }}
+                <span class="sm-muted" *ngIf="monitor.lastRefresh"
+                      [title]="'上次刷新 ' + (monitor.lastRefresh | date: 'HH:mm:ss')">
+                    {{ now | date: 'HH:mm:ss' }}
                 </span>
                 <span class="sm-muted">每 {{ intervalSeconds }}s 刷新</span>
                 <button class="btn btn-sm btn-secondary" (click)='refreshNow()'>立即刷新</button>
@@ -39,6 +41,9 @@ import { MONITOR_ICON_SVG } from '../icons'
     `],
 })
 export class MonitorTabComponent extends BaseTabComponent {
+    /** 当前时间（每秒刷新，不受监控刷新间隔影响；上次刷新时间见 tooltip） */
+    now = new Date()
+
     constructor (
         public monitor: MonitorService,
         public config: ConfigService,
@@ -47,6 +52,7 @@ export class MonitorTabComponent extends BaseTabComponent {
         super(injector)
         this.setTitle('服务器监控')
         this.icon = MONITOR_ICON_SVG
+        this.subscribeUntilDestroyed(interval(1000), () => { this.now = new Date() })
     }
 
     get intervalSeconds (): number {
